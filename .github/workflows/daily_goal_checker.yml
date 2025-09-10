@@ -1,0 +1,25 @@
+name: daily-goal-check
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 02:00 UTC daily - change as needed
+  workflow_dispatch: {} # manual run
+
+jobs:
+  goal-check:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run goal checker
+        run: |
+          node /tmp/goal-checker.js
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      - name: Done
+        run: echo "Goal checker completed"
