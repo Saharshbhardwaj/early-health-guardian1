@@ -1,36 +1,32 @@
-import { Toaster } from "@/components/ui/toaster";
-import { Toaster as Sonner } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// src/App.tsx
+import React from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import Index from "./pages/Index";
-import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
-import AddData from "./pages/AddData";
+
+// Pages (replace "@/pages/..." with relative imports if your project doesn't use the alias)
+import Login from "@/pages/Login";
+import SignUp from "@/pages/SignUp";
+import ConfirmEmail from "@/pages/ConfirmEmail";
+import Dashboard from "@/pages/Dashboard";
+import AddData from "@/pages/AddData";
 import Symptoms from "./pages/Symptoms";
 import Reports from "./pages/Reports";
-import NotFound from "./pages/NotFound";
 
-const queryClient = new QueryClient();
-
-const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Login />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/add-data" element={<AddData />} />
-          <Route path="/symptoms" element={<Symptoms />} />
-          <Route path="/reports" element={<Reports />} />
-          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
-    </TooltipProvider>
-  </QueryClientProvider>
-);
+const App: React.FC = () => {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route index element={<Login />} />
+        <Route path="/signup" element={<SignUp />} />
+        <Route path="/confirm" element={<ConfirmEmail />} />
+        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/add-data" element={<AddData />} />
+        <Route path="/symptoms" element={<Symptoms/>}/>
+        <Route path="/reports" element={<Reports/>}/>
+        {/* Fallback 404 page */}
+        <Route path="*" element={<div className="p-8">404 — Page not found</div>} />
+      </Routes>
+    </BrowserRouter>
+  );
+};
 
 export default App;

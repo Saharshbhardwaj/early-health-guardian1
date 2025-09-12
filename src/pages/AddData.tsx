@@ -1,6 +1,6 @@
-import { useState } from "react";
+// src/pages/AddData.tsx
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/lib/supabaseClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,74 +9,33 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Heart, ArrowLeft, Save } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/lib/supabaseClient";
+import agentLib from "@/lib/agent";
 
-const num = (v: any) => (v === null || v === undefined ? null : Number(v));
+type FormState = {
+  heartRate: string;
+  systolicBP: string;
+  diastolicBP: string;
+  bloodSugar: string;
+  weight: string;
+  temperature: string;
+  sleepHours: string;
+  exerciseMinutes: string;
+  mood: string;
+  symptoms: string;
+  medications: string;
+  notes: string;
+};
 
-function computeDiabetesRiskFromEntry(entry: any, profile?: any) {
-  if (!entry) return 10;
-  const sugar = num(entry.blood_sugar);
-  const sugarType = entry.blood_sugar_type ?? null;
-  let score = 10;
-  if (sugar == null) return score;
-
-  if (sugarType === "fasting") {
-    if (sugar >= 126) score = 95;
-    else if (sugar >= 100) score = 70;
-    else if (sugar >= 90) score = 30;
-  } else {
-    if (sugar >= 200) score = 95;
-    else if (sugar >= 140) score = 70;
-    else if (sugar >= 120) score = 40;
-  }
-
-  const weight = num(entry.weight);
-  if (weight && weight >= 200) score = Math.min(100, score + 8);
-  else if (weight && weight >= 180) score = Math.min(100, score + 5);
-
-  const age = profile?.age ? Number(profile.age) : null;
-  if (age && age >= 65) score = Math.min(100, score + 5);
-  else if (age && age >= 50) score = Math.min(100, score + 3);
-
-  return Math.round(score);
-}
-
-function computeHeartRiskFromEntry(entry: any, symptomsEntry?: any, profile?: any) {
-  let score = 20;
-  if (!entry && !symptomsEntry) return score;
-  const sys = num(entry?.systolic_bp), dia = num(entry?.diastolic_bp), hr = num(entry?.heart_rate);
-
-  if (sys != null && dia != null) {
-    if (sys >= 160 || dia >= 100) score = 90;
-    else if (sys >= 140 || dia >= 90) score = 75;
-    else if (sys >= 130 || dia >= 85) score = 55;
-    else if (sys >= 120 || dia >= 80) score = Math.max(score, 35);
-  }
-  if (hr != null) {
-    if (hr < 50 || hr > 110) score = Math.min(100, score + 20);
-    else if (hr > 100) score = Math.min(100, score + 12);
-  }
-
-  const symptomIds = Array.isArray(symptomsEntry?.symptoms) ? symptomsEntry.symptoms.map((s: any) => s.id) : [];
-  if (symptomIds.includes("chest-pain")) score = Math.min(100, score + 30);
-  if (symptomIds.includes("irregular-heartbeat")) score = Math.min(100, score + 20);
-
-  const age = profile?.age ? Number(profile.age) : null;
-  if (age && age >= 65) score = Math.min(100, score + 10);
-  else if (age && age >= 50) score = Math.min(100, score + 6);
-
-  return Math.round(score);
-}
-
-const AddData = () => {
+const AddData: React.FC = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<FormState>({
     heartRate: "",
     systolicBP: "",
     diastolicBP: "",
     bloodSugar: "",
-    bloodSugarType: "fasting", // fasting | random
     weight: "",
     temperature: "",
     sleepHours: "",
@@ -87,142 +46,236 @@ const AddData = () => {
     notes: ""
   });
 
-  const handleInputChange = (field: string, value: string) => {
+  const [saving, setSaving] = useState(false);
+
+  const handleInputChange = (field: keyof FormState, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaving(true);
 
-    // get user id (supabase session preferred, fallback to localStorage)
-    const { data: sessionData } = await supabase.auth.getSession();
-    const sessionUserId = sessionData?.session?.user?.id;
-    const localRaw = localStorage.getItem("user");
-    const localUser = localRaw ? JSON.parse(localRaw) : null;
-    const userId = sessionUserId || localUser?.id;
-
-    if (!userId) {
-      toast({
-        title: "Not authenticated",
-        description: "Please sign in before saving data.",
-        variant: "destructive"
-      });
-      navigate("/");
-      return;
-    }
-
-    // Build payload for health_data table
-    const payload: any = {
-      user_id: userId,
-      heart_rate: formData.heartRate ? parseInt(formData.heartRate) : null,
-      systolic_bp: formData.systolicBP ? parseInt(formData.systolicBP) : null,
-      diastolic_bp: formData.diastolicBP ? parseInt(formData.diastolicBP) : null,
-      blood_sugar: formData.bloodSugar ? parseFloat(formData.bloodSugar) : null,
-      blood_sugar_type: formData.bloodSugarType || null,
-      weight: formData.weight ? parseFloat(formData.weight) : null,
-      temperature: formData.temperature ? parseFloat(formData.temperature) : null,
-      sleep_hours: formData.sleepHours ? parseFloat(formData.sleepHours) : null,
-      exercise_minutes: formData.exerciseMinutes ? parseInt(formData.exerciseMinutes) : null,
-      mood: formData.mood || null,
-      symptoms: formData.symptoms || null,
-      medications: formData.medications || null,
-      notes: formData.notes || null,
-      timestamp: new Date().toISOString(),
-      date: new Date().toLocaleDateString()
-    };
-
-    // insert into health_data
-    const { data, error } = await supabase.from("health_data").insert([payload]).select().single();
-
-    if (error) {
-      console.error("Insert health_data error:", error);
-      toast({
-        title: "Save failed",
-        description: error.message,
-        variant: "destructive"
-      });
-      return;
-    }
-
-    toast({
-      title: "Health Data Saved",
-      description: "Your health information has been recorded successfully.",
-      variant: "default"
-    });
-
-    // inserted entry
-    const insertedEntry = data;
-
-    // --- generate client-side insight and save to health_insights ---
     try {
-      // fetch profile if available to use age/other factors
-      let profileObj = null;
-      try {
-        const { data: pf, error: pfErr } = await supabase.from("profiles").select("*").eq("id", userId).single();
-        if (!pfErr) profileObj = pf;
-      } catch (e) {
-        // ignore
-      }
+      // Get currently authenticated user
+      const { data: userResp, error: userErr } = await supabase.auth.getUser();
+      if (userErr) throw userErr;
+      const userId = userResp?.user?.id;
+      if (!userId) throw new Error("Not logged in. Please sign in to add data.");
 
-      // fetch latest symptoms for the user (if any)
-      let latestSymptoms = null;
-      try {
-        const { data: sData } = await supabase
-          .from("symptoms")
-          .select("*")
-          .eq("user_id", userId)
-          .order("timestamp", { ascending: false })
-          .limit(1)
-          .single();
-        latestSymptoms = sData ?? null;
-      } catch (e) {
-        // ignore if table not present / no rows
-      }
-
-      const diabetes = computeDiabetesRiskFromEntry(insertedEntry, profileObj);
-      const heart = computeHeartRiskFromEntry(insertedEntry, latestSymptoms, profileObj);
-
-      // pick primary risk
-      let primary = "Diabetes";
-      let primaryScore = diabetes;
-      if (heart > primaryScore) { primary = "Heart disease"; primaryScore = heart; }
-
-      const title =
-        primaryScore >= 80 ? `${primary} risk: High` :
-        primaryScore >= 50 ? `${primary} risk: Moderate` :
-        `${primary} risk: Low`;
-
-      const body =
-        primaryScore >= 80
-          ? `Your latest reading indicates a high ${primary.toLowerCase()} risk (${primaryScore}%). Please contact a healthcare professional or call 112 if you have severe symptoms.`
-          : primaryScore >= 50
-          ? `Your latest reading shows a moderate ${primary.toLowerCase()} risk (${primaryScore}%). Consider scheduling a doctor's visit for follow-up.`
-          : `Your latest reading shows low ${primary.toLowerCase()} risk (${primaryScore}%). Keep tracking regularly.`;
-
-      const insightPayload = {
+      // Build row for health_data
+      const row = {
         user_id: userId,
-        title,
-        body,
-        risk_summary: { diabetes, heart },
-        source: "client-agent-v1",
-        created_at: new Date().toISOString()
+        heart_rate: formData.heartRate ? Number(formData.heartRate) : null,
+        systolic_bp: formData.systolicBP ? Number(formData.systolicBP) : null,
+        diastolic_bp: formData.diastolicBP ? Number(formData.diastolicBP) : null,
+        blood_sugar: formData.bloodSugar ? Number(formData.bloodSugar) : null,
+        weight: formData.weight ? Number(formData.weight) : null,
+        temperature: formData.temperature ? Number(formData.temperature) : null,
+        sleep_hours: formData.sleepHours ? Number(formData.sleepHours) : null,
+        exercise_minutes: formData.exerciseMinutes ? Number(formData.exerciseMinutes) : null,
+        mood: formData.mood || null,
+        symptoms: formData.symptoms || null,
+        medications: formData.medications || null,
+        notes: formData.notes || null,
+        created_at: new Date().toISOString(),
+        timestamp: new Date().toISOString()
       };
 
-      const { error: insightError } = await supabase.from("health_insights").insert([insightPayload]);
-      if (insightError) {
-        console.warn("Failed to insert insight:", insightError);
-      } else {
-        console.log("Insight inserted");
-      }
-    } catch (err) {
-      console.error("Insight generation error:", err);
-    }
+      // Insert into health_data
+      const { data: insertData, error: insertError } = await supabase
+        .from("health_data")
+        .insert([row])
+        .select()
+        .single();
 
-    navigate("/dashboard");
+      if (insertError) throw insertError;
+
+      toast({
+        title: "Health Data Saved",
+        description: "Your health information has been recorded successfully.",
+        variant: "default"
+      });
+
+      // --- Agentic actions start ---
+
+      // Compute risk snapshot
+      const risks = agentLib.computeRisks(row);
+
+      // Format insight text
+      const insightTitle = "Health reading recorded";
+      const insightBody = agentLib.formatInsightText(insightTitle, risks, row);
+
+      // Persist insight to health_insights
+      try {
+        await agentLib.createInsightForUser(userId, insightTitle, insightBody, { risks, vitals: row }, "client");
+      } catch (insErr) {
+        console.warn("createInsightForUser failed:", insErr);
+      }
+
+      // Create an in-app notification for the patient
+      try {
+        await supabase.from("notifications").insert([{
+          user_id: userId,
+          title: "Health alert: new reading",
+          body: insightBody,
+          level: "info",
+          channel: "in-app",
+          data: { risks, readingId: insertData?.id ?? null }
+        }]);
+      } catch (notifErr) {
+        console.warn("Failed to insert patient notification:", notifErr);
+      }
+
+      // If urgent thresholds met, escalate (in-app + external via /api/notify) to patient + caregivers
+      const urgent = agentLib.shouldAlert(risks);
+      if (urgent) {
+        // mark patient notification as urgent
+        try {
+          await supabase.from("notifications").insert([{
+            user_id: userId,
+            title: "Urgent: abnormal health reading",
+            body: insightBody,
+            level: "urgent",
+            channel: "in-app",
+            data: { risks, readingId: insertData?.id ?? null }
+          }]);
+        } catch (err) {
+          console.warn("Failed to insert urgent notification for patient:", err);
+        }
+
+        // Attempt to fetch patient's email (profile table) - optional, may not exist
+        let patientEmail: string | null = null;
+        try {
+          const { data: profile, error: profileErr } = await supabase.from("profiles").select("email").eq("id", userId).single();
+          if (!profileErr && profile?.email) patientEmail = profile.email;
+        } catch (e) {
+          // ignore; fallback to auth user email below
+        }
+        if (!patientEmail) {
+          try {
+            const { data: authUserResp } = await supabase.auth.getUser();
+            patientEmail = authUserResp?.user?.email ?? null;
+          } catch (e) { /* ignore */ }
+        }
+
+        // Notify patient externally if email exists
+        if (patientEmail) {
+          try {
+            await fetch("/api/notify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                to: patientEmail,
+                channel: "email",
+                title: "Urgent: abnormal health reading recorded",
+                body: `An urgent health reading was recorded:\n\n${insightBody}\n\nIf you feel unwell, seek medical attention.`,
+                meta: { userId, readingId: insertData?.id ?? null }
+              })
+            });
+          } catch (err) {
+            console.warn("External notify (patient) failed:", err);
+          }
+        }
+
+        // Find caregivers for this user and notify them
+        try {
+          const { data: carers, error: carersErr } = await supabase.from("caregivers").select("*").eq("user_id", userId);
+          if (!carersErr && Array.isArray(carers) && carers.length > 0) {
+            for (const c of carers) {
+              // in-app notification for caregiver (if caregiver_user_id present, use that)
+              try {
+                await supabase.from("notifications").insert([{
+                  user_id: c.caregiver_user_id ?? null,
+                  related_user_id: userId,
+                  title: `Patient alert: ${c.name ?? "Your patient"}`,
+                  body: insightBody,
+                  level: "urgent",
+                  channel: "in-app",
+                  data: { patientId: userId, readingId: insertData?.id ?? null }
+                }]);
+              } catch (err) {
+                console.warn("Failed to insert caregiver in-app notification:", err);
+              }
+
+              // external delivery: email then sms fallback
+              if (c.email) {
+                try {
+                  await fetch("/api/notify", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      to: c.email,
+                      channel: "email",
+                      title: `Urgent: patient ${c.name ?? ""} reading`,
+                      body: `An urgent reading was recorded for your patient:\n\n${insightBody}\n\nPlease check the Early Health Guardian dashboard for details.`,
+                      meta: { patientId: userId, caregiverId: c.id }
+                    })
+                  });
+                } catch (err) {
+                  console.warn("notify caregiver email failed:", err);
+                }
+              }
+              if (c.phone) {
+                try {
+                  await fetch("/api/notify", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      to: c.phone,
+                      channel: "sms",
+                      title: `Urgent: patient reading`,
+                      body: insightBody,
+                      meta: { patientId: userId, caregiverId: c.id }
+                    })
+                  });
+                } catch (err) {
+                  console.warn("notify caregiver sms failed:", err);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("Fetching caregivers failed:", err);
+        }
+      } // end urgent
+
+      // Schedule follow-up reminder for moderate risk
+      try {
+        const moderate = (risks.diabetes ?? 0) >= 50 || (risks.hypertension ?? 0) >= 50 || (risks.heartDisease ?? 0) >= 50;
+        if (moderate) {
+          const scheduledAt = new Date();
+          scheduledAt.setDate(scheduledAt.getDate() + 3);
+          await supabase.from("reminders").insert([{
+            user_id: userId,
+            title: "Follow-up: re-check health readings",
+            body: "Please re-enter your vitals so we can track trends.",
+            scheduled_at: scheduledAt.toISOString(),
+            metadata: { triggeredByReading: insertData?.id ?? null }
+          }]);
+        }
+      } catch (err) {
+        console.warn("Scheduling reminder failed:", err);
+      }
+
+      // --- Agentic actions end ---
+
+      navigate("/dashboard");
+    } catch (err: any) {
+      console.error("save error", err);
+      toast({
+        title: "Save failed",
+        description: err?.message ?? "Could not save health data",
+        variant: "destructive"
+      });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Header */}
       <header className="border-b bg-card">
         <div className="container mx-auto px-4 py-4 flex items-center gap-4">
           <Button variant="ghost" size="sm" onClick={() => navigate("/dashboard")}>
@@ -236,7 +289,7 @@ const AddData = () => {
         </div>
       </header>
 
-      <div className="container mx-auto px-4 py-6 max-w-4xl">
+      <main className="container mx-auto px-4 py-6 max-w-4xl">
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Vital Signs */}
           <Card>
@@ -266,19 +319,8 @@ const AddData = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="bloodSugarType">Blood Sugar Type</Label>
-                  <Select value={formData.bloodSugarType} onValueChange={(v) => handleInputChange("bloodSugarType", v)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="fasting">Fasting</SelectItem>
-                      <SelectItem value="random">Random</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="weight">Weight (lbs)</Label>
-                  <Input id="weight" type="number" placeholder="165" value={formData.weight} onChange={(e) => handleInputChange("weight", e.target.value)} />
+                  <Label htmlFor="weight">Weight (kg)</Label>
+                  <Input id="weight" type="number" placeholder="70" value={formData.weight} onChange={(e) => handleInputChange("weight", e.target.value)} />
                 </div>
 
                 <div className="space-y-2">
@@ -289,7 +331,7 @@ const AddData = () => {
             </CardContent>
           </Card>
 
-          {/* Lifestyle & Wellness */}
+          {/* Lifestyle */}
           <Card>
             <CardHeader>
               <CardTitle>Lifestyle & Wellness</CardTitle>
@@ -300,14 +342,18 @@ const AddData = () => {
                   <Label htmlFor="sleepHours">Sleep Hours</Label>
                   <Input id="sleepHours" type="number" step="0.5" placeholder="8" value={formData.sleepHours} onChange={(e) => handleInputChange("sleepHours", e.target.value)} />
                 </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="exerciseMinutes">Exercise (minutes)</Label>
                   <Input id="exerciseMinutes" type="number" placeholder="30" value={formData.exerciseMinutes} onChange={(e) => handleInputChange("exerciseMinutes", e.target.value)} />
                 </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="mood">Mood</Label>
-                  <Select value={formData.mood} onValueChange={(v) => handleInputChange("mood", v)}>
-                    <SelectTrigger><SelectValue placeholder="Select mood" /></SelectTrigger>
+                  <Select value={formData.mood} onValueChange={(value) => handleInputChange("mood", value)}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select your mood" />
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="excellent">Excellent</SelectItem>
                       <SelectItem value="good">Good</SelectItem>
@@ -328,26 +374,32 @@ const AddData = () => {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="symptoms">Symptoms</Label>
-                <Textarea id="symptoms" placeholder="Describe any symptoms..." value={formData.symptoms} onChange={(e) => handleInputChange("symptoms", e.target.value)} />
+                <Label htmlFor="symptoms">Current Symptoms</Label>
+                <Textarea id="symptoms" placeholder="Describe any symptoms you're experiencing today..." value={formData.symptoms} onChange={(e) => handleInputChange("symptoms", e.target.value)} />
               </div>
+
               <div className="space-y-2">
-                <Label htmlFor="medications">Medications</Label>
-                <Textarea id="medications" placeholder="List medications..." value={formData.medications} onChange={(e) => handleInputChange("medications", e.target.value)} />
+                <Label htmlFor="medications">Medications Taken</Label>
+                <Textarea id="medications" placeholder="List medications taken today..." value={formData.medications} onChange={(e) => handleInputChange("medications", e.target.value)} />
               </div>
+
               <div className="space-y-2">
-                <Label htmlFor="notes">Notes</Label>
-                <Textarea id="notes" placeholder="Any other notes..." value={formData.notes} onChange={(e) => handleInputChange("notes", e.target.value)} />
+                <Label htmlFor="notes">Additional Notes</Label>
+                <Textarea id="notes" placeholder="Any other health-related observations..." value={formData.notes} onChange={(e) => handleInputChange("notes", e.target.value)} />
               </div>
             </CardContent>
           </Card>
 
+          {/* Submit */}
           <div className="flex justify-end gap-4">
             <Button type="button" variant="outline" onClick={() => navigate("/dashboard")}>Cancel</Button>
-            <Button type="submit"><Save className="h-4 w-4 mr-2" />Save Health Data</Button>
+            <Button type="submit" disabled={saving}>
+              <Save className="h-4 w-4 mr-2" />
+              {saving ? "Saving..." : "Save Health Data"}
+            </Button>
           </div>
         </form>
-      </div>
+      </main>
     </div>
   );
 };
