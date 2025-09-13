@@ -1,35 +1,73 @@
-import { Progress } from "@/components/ui/progress";
-import { Badge } from "@/components/ui/badge";
+// src/components/RiskIndicator.tsx
+import React from "react";
 
-interface RiskIndicatorProps {
+type RiskIndicatorProps = {
   disease: string;
-  risk: number;
-  color: "success" | "warning" | "destructive";
-}
+  risk: number | string;
+  color?: string; // optional
+  className?: string;
+};
 
-export const RiskIndicator = ({ disease, risk, color }: RiskIndicatorProps) => {
-  const getRiskLevel = (risk: number) => {
-    if (risk <= 30) return { level: "Low", variant: "success" as const };
-    if (risk <= 60) return { level: "Medium", variant: "warning" as const };
-    return { level: "High", variant: "destructive" as const };
-  };
+/**
+ * RiskIndicator
+ * - disease: display name or key (e.g. "diabetes")
+ * - risk: numeric percent (0-100) or string
+ * - color: optional CSS color string; if not provided component will pick a color based on disease
+ */
+const defaultColorFor = (disease: string) => {
+  const key = String(disease || "").toLowerCase();
+  if (key.includes("heart") || key.includes("cardio") || key.includes("hypertension")) return "rgb(220, 38, 38)"; // red
+  if (key.includes("diabetes") || key.includes("sugar")) return "rgb(234, 88, 12)"; // orange
+  if (key.includes("alzheimer") || key.includes("memory") || key.includes("neuro")) return "rgb(6, 78, 59)"; // teal/green
+  if (key.includes("stroke")) return "rgb(154, 16, 255)"; // purple
+  // fallback
+  return "rgb(13, 148, 136)"; // emerald-ish
+};
 
-  const { level, variant } = getRiskLevel(risk);
+const RiskIndicator: React.FC<RiskIndicatorProps> = ({ disease, risk, color, className = "" }) => {
+  const numericRisk = typeof risk === "number" ? Math.round(risk) : Number(risk) || 0;
+  const displayName = String(disease)
+    .split(/_|-|\s/)
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ""))
+    .join(" ");
+
+  const fillColor = color ?? defaultColorFor(displayName);
+
+  const severityLabel = numericRisk >= 80 ? "High" : numericRisk >= 50 ? "Moderate" : "Low";
 
   return (
-    <div className="space-y-2">
-      <div className="flex justify-between items-center">
-        <span className="font-medium text-sm">{disease}</span>
-        <Badge variant={variant} className="text-xs">
-          {level} Risk
-        </Badge>
+    <div className={`p-3 border rounded shadow-sm ${className}`} role="region" aria-label={`${displayName} risk`}>
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-muted-foreground">{displayName}</div>
+        <div
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: 999,
+            background: fillColor
+          }}
+          aria-hidden
+        />
       </div>
-      <Progress value={risk} className="h-2" />
-      <div className="flex justify-between text-xs text-muted-foreground">
-        <span>0%</span>
-        <span>{risk}%</span>
-        <span>100%</span>
+
+      <div className="text-2xl font-semibold mt-2" style={{ color: fillColor }}>
+        {numericRisk}%
+      </div>
+      <div className="text-xs mt-1 text-muted-foreground">{severityLabel}</div>
+
+      {/* optional small progress bar */}
+      <div className="w-full bg-neutral-100 rounded-full h-2 mt-3 overflow-hidden">
+        <div
+          style={{
+            width: `${Math.max(0, Math.min(100, numericRisk))}%`,
+            height: "100%",
+            background: fillColor,
+            transition: "width 400ms ease"
+          }}
+        />
       </div>
     </div>
   );
 };
+
+export default RiskIndicator;

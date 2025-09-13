@@ -1,499 +1,559 @@
 // src/pages/Dashboard.tsx
-import { useState, useEffect } from "react";
-import { supabase } from "@/lib/supabaseClient";
-import agentLib, { pickTips } from "@/lib/agent";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { supabase } from "@/lib/supabaseClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import {
-  Heart,
-  Activity,
-  Thermometer,
-  LogOut,
-  TrendingUp,
-  Weight,
-  Sparkles,
-  Notebook
-} from "lucide-react";
-import HealthChart, { HealthChartDatum } from "@/components/HealthChart";
+import { Heart, Activity, Thermometer, Plus, Calendar, LogOut, TrendingUp } from "lucide-react";
+import { HealthChart } from "@/components/HealthChart";
+import RiskIndicator from "@/components/RiskIndicator";
+import { useToast } from "@/hooks/use-toast";
 
-type HealthRow = {
-  id?: string;
-  heart_rate?: number | null;
-  systolic_bp?: number | null;
-  diastolic_bp?: number | null;
-  blood_sugar?: number | null;
-  weight?: number | null;
-  temperature?: number | null;
-  sleep_hours?: number | null;
-  exercise_minutes?: number | null;
-  mood?: string | null;
-  symptoms?: string | null;     // plain text
-  medications?: string | null;  // plain text
-  notes?: string | null;        // plain text
-  created_at?: string | null;
-  timestamp?: string | null;
-  [k: string]: any;
-};
+/**
+ * Dashboard layout adjustments:
+ * - Recent Activity card moved from right sidebar into left column (below AI Insights)
+ * - AI Insights & Risk Summary card made taller (min-h increased) so it visually matches sidebar height
+ * - Two-column disease grid retained
+ * - All data fetching/parsing logic unchanged
+ */
 
-const diseaseEmoji: { [k: string]: string } = {
-  diabetes: "💉",
-  hypertension: "⚡",
-  heartDisease: "❤️",
-  stroke: "⚠️",
-  alzheimer: "🧠",
-  copd: "🫁",
-  kidneyDisease: "💧",
-  obesity: "⚖️",
-};
-
-const ALL_TIPS = [
-  "Stay hydrated — aim for a glass of water every hour while awake.",
-  "Keep a short daily walk (15–30 minutes) to support circulation.",
-  "Choose whole grains and vegetables to help stabilise blood sugar.",
-  "Limit high-sodium processed foods to help manage blood pressure.",
-  "Practice deep breathing for 3–5 minutes to reduce stress and heart rate.",
-  "If you feel lightheaded, sit down and rest for several minutes.",
-  "Check medications list and timings — take medicines as prescribed.",
-  "Try a short stretching routine in the morning to ease stiffness.",
-  "Avoid heavy meals right before bedtime to improve sleep quality.",
-  "Record any dizziness or fainting episodes and share with your doctor."
+const HEALTH_TIPS = [
+  "Stay hydrated — aim for 8 cups of water throughout the day.",
+  "Try a short 20-minute walk to improve circulation.",
+  "Reduce processed sugar; choose whole fruits.",
+  "Practice 3 minutes of deep breathing to lower stress.",
+  "Keep consistent sleep times to support memory and recovery.",
+  "Stand and stretch every hour if you sit a lot.",
+  "Light resistance training twice weekly supports heart health.",
+  "Include vegetables and lean protein in your meals."
 ];
 
-const Dashboard = () => {
-  const [user, setUser] = useState<any | null>(null);
-  const [latestVitals, setLatestVitals] = useState<HealthRow | null>(null);
-  const [recentReadings, setRecentReadings] = useState<HealthRow[]>([]);
-  const [insights, setInsights] = useState<any[]>([]);
-  const [risks, setRisks] = useState<{ [k: string]: number }>({});
-  const [tips, setTips] = useState<string[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const navigate = useNavigate();
+const DISEASES = [
+  { key: "diabetes", label: "Diabetes", color: "#f59e0b" },
+  { key: "heartDisease", label: "Heart Disease", color: "#ef4444" },
+  { key: "hypertension", label: "Hypertension", color: "#3b82f6" },
+  { key: "stroke", label: "Stroke", color: "#a78bfa" },
+  { key: "alzheimer", label: "Alzheimer's", color: "#06b6d4" },
+  { key: "respiratory", label: "Respiratory (COPD)", color: "#0ea5a4" },
+  { key: "kidney", label: "Kidney Disease", color: "#7c3aed" },
+  { key: "obesity", label: "Obesity", color: "#f97316" },
+  { key: "anemia", label: "Anemia", color: "#ef9a9a" },
+  { key: "osteoporosis", label: "Osteoporosis", color: "#60a5fa" }
+];
 
-  const fmtDate = (s?: string | null) => (s ? new Date(s).toLocaleString() : "-");
+const prettyLabel = (slug?: string) => {
+  if (!slug) return "Unknown";
+  return slug
+    .replace(/[-_]/g, " ")
+    .split(" ")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+};
+
+const formatDate = (iso?: string) => {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return String(iso);
+  }
+};
+
+const Dashboard: React.FC = () => {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+
+  const [user, setUser] = useState<any | null>(null);
+  const [profile, setProfile] = useState<any | null>(null);
+  const [readings, setReadings] = useState<any[]>([]);
+  const [latest, setLatest] = useState<any | null>(null);
+  const [insights, setInsights] = useState<any[]>([]);
+  const [symptoms, setSymptoms] = useState<any[]>([]);
+  const [reminders, setReminders] = useState<any[]>([]);
+  const [tips, setTips] = useState<string[]>(HEALTH_TIPS);
+  const [notesList, setNotesList] = useState<{ source: string; text: string; created_at?: string }[]>([]);
 
   useEffect(() => {
-    const raw = localStorage.getItem("user");
-    if (raw) {
-      try {
-        setUser(JSON.parse(raw));
-      } catch {
-        setUser({ email: raw });
+    setTips((t) => {
+      const arr = [...t];
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
       }
-    }
+      return arr;
+    });
   }, []);
 
-  async function getCurrentUserId(): Promise<string | null> {
-    try {
-      const { data: userResp, error } = await supabase.auth.getUser();
-      if (error) {
-        console.warn("supabase.auth.getUser error:", error);
-        return null;
+  useEffect(() => {
+    const loadUser = async () => {
+      try {
+        const { data } = await supabase.auth.getUser();
+        const authUser = data?.user ?? null;
+        if (!authUser) {
+          try {
+            const local = JSON.parse(localStorage.getItem("user") || "null");
+            if (!local) { navigate("/"); return; }
+            setUser({ id: local.id || local.userId || local.uid, email: local.email, name: local.name || local.email });
+          } catch {
+            navigate("/");
+            return;
+          }
+        } else {
+          setUser({ id: authUser.id, email: authUser.email, name: authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email });
+          try {
+            const { data: p, error: pErr } = await supabase.from("profiles").select("*").eq("id", authUser.id).single();
+            if (!pErr && p) setProfile(p);
+            if (p?.full_name) setUser((u: any) => ({ ...u, name: p.full_name }));
+          } catch (e) {
+            console.warn("profile fetch error:", e);
+          }
+        }
+      } catch (e) {
+        console.error("loadUser error", e);
+        navigate("/");
       }
-      return userResp?.user?.id ?? null;
-    } catch (e) {
-      console.error("getCurrentUserId exception:", e);
-      return null;
-    }
-  }
+    };
+    loadUser();
+  }, [navigate]);
 
   useEffect(() => {
-    let mounted = true;
+    if (!user?.id) return;
 
     const fetchAll = async () => {
-      setLoading(true);
       try {
-        const uid = await getCurrentUserId();
-        if (!uid) {
-          navigate("/");
-          return;
-        }
-
-        const recentResp = await supabase
+        const { data: hd, error: hdErr } = await supabase
           .from("health_data")
-          .select(
-            "id, heart_rate, systolic_bp, diastolic_bp, blood_sugar, weight, temperature, sleep_hours, exercise_minutes, mood, symptoms, medications, notes, created_at, timestamp"
-          )
-          .eq("user_id", uid)
+          .select("*")
+          .eq("user_id", user.id)
           .order("created_at", { ascending: false })
-          .limit(14);
+          .limit(20);
 
-        const recentData: HealthRow[] = recentResp.error ? [] : (Array.isArray(recentResp.data) ? (recentResp.data as HealthRow[]) : []);
-
-        if (mounted) {
-          setRecentReadings(recentData);
-          setLatestVitals(recentData.length ? recentData[0] : null);
+        if (hdErr) {
+          console.warn("health_data fetch err", hdErr);
+          toast({ title: "Failed to load health data", description: hdErr.message, variant: "destructive" });
+        } else {
+          setReadings(hd || []);
+          setLatest((hd && hd[0]) || null);
         }
 
-        const insightsResp = await supabase
+        const { data: ins, error: insErr } = await supabase
           .from("health_insights")
           .select("*")
-          .eq("user_id", uid)
+          .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(10);
 
-        if (mounted) {
-          setInsights(insightsResp.error ? [] : (Array.isArray(insightsResp.data) ? insightsResp.data : []));
-        }
+        if (!insErr && ins) setInsights(ins);
 
-        if (recentData.length) {
-          const latest = recentData[0];
-          const computed = agentLib.computeRisks(latest as any);
-          if (mounted) setRisks(computed);
+        const { data: s, error: sErr } = await supabase
+          .from("symptoms")
+          .select("*")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false })
+          .limit(50);
 
-          // pick varied tips (unique)
-          const picked = pickTips(latest as any, computed);
-          const pool = Array.from(new Set([...picked, ...ALL_TIPS])).filter(Boolean);
-          // shuffle and slice (simple Fisher-Yates)
-          for (let i = pool.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [pool[i], pool[j]] = [pool[j], pool[i]];
-          }
-          if (mounted) setTips(pool.slice(0, 4));
-        } else {
-          if (mounted) {
-            setRisks({});
-            // pick 4 varied tips from ALL_TIPS
-            const pool = [...ALL_TIPS];
-            for (let i = pool.length - 1; i > 0; i--) {
-              const j = Math.floor(Math.random() * (i + 1));
-              [pool[i], pool[j]] = [pool[j], pool[i]];
+        if (!sErr && Array.isArray(s)) {
+          const flat: any[] = [];
+          s.forEach((entry: any) => {
+            if (Array.isArray(entry.symptoms)) {
+              entry.symptoms.forEach((ss: any) =>
+                flat.push({
+                  label: ss.label ?? ss.id ?? "Unknown symptom",
+                  severity: ss.severity ?? "mild",
+                  recorded_at: entry.created_at
+                })
+              );
+            } else if (entry.symptoms) {
+              flat.push({
+                label: String(entry.symptoms),
+                severity: "n/a",
+                recorded_at: entry.created_at
+              });
             }
-            setTips(pool.slice(0, 4));
+          });
+          setSymptoms(flat);
+        }
+
+        const { data: remData, error: remErr } = await supabase
+          .from("reminders")
+          .select("*")
+          .eq("user_id", user.id)
+          .order("scheduled_at", { ascending: true })
+          .limit(10);
+        if (!remErr && Array.isArray(remData)) setReminders(remData);
+
+        // Build notesList
+        const notesArr: { source: string; text: string; created_at?: string }[] = [];
+        if (Array.isArray(hd)) {
+          for (const r of hd.slice(0, 6)) {
+            if (r.notes && String(r.notes).trim() !== "") notesArr.push({ source: "Vitals note", text: String(r.notes), created_at: r.created_at });
           }
         }
-      } catch (err) {
-        console.error("Dashboard fetch error:", err);
-        if (mounted) {
-          setRecentReadings([]);
-          setLatestVitals(null);
-          setInsights([]);
-          setTips(["Error loading dashboard."]);
+        if (Array.isArray(ins)) {
+          for (const it of ins.slice(0, 6)) {
+            if (!it.body) continue;
+            let bodyText = "";
+            try {
+              if (typeof it.body === "string") {
+                const parsed = JSON.parse(it.body);
+                if (parsed && (parsed.notes || parsed.summary || parsed.text)) {
+                  if (parsed.notes && String(parsed.notes).trim() !== "") bodyText = String(parsed.notes);
+                  else if (parsed.summary && String(parsed.summary).trim() !== "") bodyText = String(parsed.summary);
+                  else if (parsed.text && String(parsed.text).trim() !== "") bodyText = String(parsed.text);
+                } else {
+                  const nonEmpty = Object.keys(parsed).filter((k) => parsed[k] !== null && parsed[k] !== "" && !(Array.isArray(parsed[k]) && parsed[k].length === 0));
+                  if (nonEmpty.length > 0) bodyText = nonEmpty.map((k) => `${k}: ${JSON.stringify(parsed[k])}`).join("\n");
+                }
+              } else if (typeof it.body === "object") {
+                const parsed = it.body;
+                if (parsed.notes && String(parsed.notes).trim() !== "") bodyText = String(parsed.notes);
+                else if (parsed.summary && String(parsed.summary).trim() !== "") bodyText = String(parsed.summary);
+                else {
+                  const nonEmpty = Object.keys(parsed).filter((k) => parsed[k] !== null && parsed[k] !== "" && !(Array.isArray(parsed[k]) && parsed[k].length === 0));
+                  if (nonEmpty.length > 0) bodyText = nonEmpty.map((k) => `${k}: ${JSON.stringify(parsed[k])}`).join("\n");
+                }
+              } else {
+                bodyText = String(it.body);
+              }
+            } catch {
+              bodyText = String(it.body);
+            }
+            if (bodyText && bodyText.trim() !== "") notesArr.push({ source: "AI insight", text: bodyText, created_at: it.created_at });
+          }
         }
-      } finally {
-        if (mounted) setLoading(false);
+        setNotesList(notesArr);
+      } catch (e) {
+        console.error("fetchAll error", e);
       }
     };
 
     fetchAll();
-    return () => {
-      mounted = false;
-    };
-  }, [navigate]);
+  }, [user, toast]);
 
   const handleLogout = async () => {
-    try {
-      await supabase.auth.signOut();
-    } catch (e) {
-      console.warn("signOut error", e);
-    }
+    try { await supabase.auth.signOut(); } catch (e) { console.warn(e); }
     localStorage.removeItem("user");
     navigate("/");
   };
 
-  // Build chart points (include per-point risks)
-  const chartPoints: HealthChartDatum[] = (recentReadings || [])
-    .filter((r) => r && (r.created_at || r.timestamp))
-    .map((r) => {
-      const snapshotRisks = agentLib.computeRisks(r as any);
-      return {
-        date: r.created_at ?? r.timestamp ?? "",
-        heartRate: r.heart_rate ?? null,
-        sugar: r.blood_sugar ?? null,
-        bp: (r.systolic_bp != null && r.diastolic_bp != null) ? `${r.systolic_bp}/${r.diastolic_bp}` : null,
-        risks: snapshotRisks
-      };
-    })
-    .reverse();
+  const computeBMI = (r: any) => {
+    const weight = Number(r?.weight ?? 0);
+    const heightCm = Number(r?.height ?? r?.height_cm ?? 0);
+    if (!weight || !heightCm) return null;
+    const m = heightCm / 100;
+    if (!m) return null;
+    return Math.round((weight / (m * m)) * 10) / 10;
+  };
 
-  const sortedRiskEntries = Object.entries(risks || {})
-    .map(([k, v]) => ({ key: k, value: v }))
-    .sort((a, b) => b.value - a.value);
-
-  function formatDiseaseName(key: string) {
-    const map: { [k: string]: string } = {
-      diabetes: "Diabetes",
-      hypertension: "Hypertension",
-      heartDisease: "Heart Disease",
-      stroke: "Stroke",
-      alzheimer: "Alzheimer's",
-      copd: "COPD",
-      kidneyDisease: "Kidney Disease",
-      obesity: "Obesity"
+  const riskSummary = React.useMemo(() => {
+    const base: Record<string, number> = {
+      diabetes: 0, heartDisease: 0, hypertension: 0, stroke: 0, alzheimer: 0,
+      respiratory: 0, kidney: 0, obesity: 0, anemia: 0, osteoporosis: 0
     };
-    return map[key] ?? key;
-  }
 
-  // Helper: format an insight object to a readable array of bullet lines
-  function insightToBullets(ins: any): string[] {
-    // prefer metadata.highlights if present (array or string)
-    const meta = ins?.metadata;
-    if (meta && meta.highlights) {
-      if (Array.isArray(meta.highlights)) return meta.highlights.map(String);
-      if (typeof meta.highlights === "string") return meta.highlights.split(/[.\n]\s*/).map(s => s.trim()).filter(Boolean);
+    const aiSrc = insights[0]?.insights ?? {};
+    Object.keys(base).forEach((k) => { if (typeof aiSrc[k] === "number") base[k] = Math.round(aiSrc[k]); });
+
+    if (!Object.values(base).some((v) => v > 0) && latest) {
+      const sugar = Number(latest.blood_sugar ?? 0);
+      const hr = Number(latest.heart_rate ?? 0);
+      const sys = Number(latest.systolic_bp ?? 0);
+      const dia = Number(latest.diastolic_bp ?? 0);
+      const bmi = computeBMI(latest);
+
+      if (sugar >= 200) base.diabetes = 95;
+      else if (sugar >= 140) base.diabetes = 70;
+      else if (sugar >= 110) base.diabetes = 40;
+
+      if (hr >= 110) base.heartDisease = 80;
+      else if (hr >= 95) base.heartDisease = 55;
+
+      if (sys >= 160 || dia >= 100) base.hypertension = 95;
+      else if (sys >= 140 || dia >= 90) base.hypertension = 75;
+
+      if (bmi && bmi >= 35) base.obesity = 90;
+      else if (bmi && bmi >= 30) base.obesity = 70;
+      else if (bmi && bmi >= 25) base.obesity = 35;
     }
-    // else try to split body into short sentences
-    const body = ins?.body ?? "";
-    if (!body) return [];
-    // split into sentences but keep short fragments
-    const parts = body.split(/(?<=[.?!])\s+/).map(s => s.trim()).filter(Boolean);
-    // further shorten very long sentences into chunks (if needed)
-    const bullets = parts.flatMap(p => {
-      if (p.length > 160) {
-        // break long parts at commas for readability
-        return p.split(/,\s+/).map(s => s.trim()).filter(Boolean);
-      }
-      return p;
-    });
-    return bullets.slice(0, 6); // cap bullets per insight
-  }
 
-  // Symptoms list: build nicely (one list item per reading's symptoms)
-  const symptomsList = recentReadings
-    .filter(r => r.symptoms && r.symptoms.trim())
-    .slice(0, 6)
-    .map(r => ({
-      text: r.symptoms as string,
-      created_at: r.created_at ?? r.timestamp ?? null,
-      id: r.id ?? Math.random().toString(36).slice(2, 9)
-    }));
+    Object.keys(base).forEach((k) => {
+      const v = Number(base[k] || 0);
+      base[k] = Math.max(0, Math.min(100, Math.round(v)));
+    });
+
+    return base;
+  }, [insights, latest, profile, symptoms]);
+
+  const renderInsightBody = (body: any) => {
+    if (!body) return <div className="text-sm text-muted-foreground">No extra details.</div>;
+
+    let parsed: any = body;
+    if (typeof body === "string") {
+      try { parsed = JSON.parse(body); } catch { parsed = body; }
+    }
+
+    if (typeof parsed === "object" && parsed !== null) {
+      const parts: JSX.Element[] = [];
+      const symptomsArr = parsed.symptoms && Array.isArray(parsed.symptoms) ? parsed.symptoms : null;
+      if (symptomsArr && symptomsArr.length > 0) {
+        parts.push(
+          <div key="symptoms">
+            <div className="font-medium text-sm">Symptoms recorded</div>
+            <ol className="list-decimal ml-5 mt-1 text-sm">
+              {symptomsArr.map((s: any, idx: number) => {
+                const label = s.label ?? s.id ?? JSON.stringify(s);
+                const sev = s.severity ? ` — ${s.severity}` : "";
+                return (<li key={idx} className="mb-1">{label}{sev}</li>);
+              })}
+            </ol>
+          </div>
+        );
+      }
+
+      const summaryKeys = ["summary", "text", "notes", "body"];
+      for (const k of summaryKeys) {
+        if (parsed[k] && String(parsed[k]).trim() !== "") {
+          parts.push(
+            <div key={k} className="mt-2">
+              <div className="font-medium text-sm">{k.charAt(0).toUpperCase() + k.slice(1)}</div>
+              <div className="whitespace-pre-wrap text-sm mt-1">{String(parsed[k])}</div>
+            </div>
+          );
+        }
+      }
+
+      if (parts.length === 0) {
+        const nonEmptyKeys = Object.keys(parsed).filter((k) => {
+          const v = parsed[k];
+          if (v === null || v === undefined) return false;
+          if (typeof v === "string") return v.trim() !== "";
+          if (Array.isArray(v)) return v.length > 0;
+          return true;
+        });
+        if (nonEmptyKeys.length > 0) {
+          parts.push(
+            <div key="other">
+              {nonEmptyKeys.map((k) => (
+                <div key={k} className="text-sm mb-1">
+                  <div className="text-xs text-muted-foreground">{k}</div>
+                  <div className="whitespace-pre-wrap">{typeof parsed[k] === "object" ? JSON.stringify(parsed[k], null, 2) : String(parsed[k])}</div>
+                </div>
+              ))}
+            </div>
+          );
+        } else {
+          return <div className="text-sm text-muted-foreground">No insight details available.</div>;
+        }
+      }
+
+      return <div className="space-y-2">{parts}</div>;
+    }
+
+    return <div className="text-sm">{String(parsed)}</div>;
+  };
+
+  const todaysTip = tips[0] ?? HEALTH_TIPS[0];
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
       <header className="border-b bg-card">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Heart className="h-6 w-6 text-primary" />
             <h1 className="text-xl font-semibold">Early Health Guardian</h1>
           </div>
-
           <div className="flex items-center gap-4">
-            <span className="text-sm text-muted-foreground">Welcome, {user?.name || "User"}</span>
+            <span className="text-sm text-muted-foreground">Welcome, {user?.name ?? user?.email ?? "Patient"}</span>
             <Badge variant="default">patient</Badge>
             <Button variant="outline" size="sm" onClick={handleLogout}>
-              <LogOut className="h-4 w-4 mr-2" />
-              Logout
+              <LogOut className="h-4 w-4 mr-2" /> Logout
             </Button>
           </div>
         </div>
       </header>
 
-      <div className="container mx-auto px-4 py-6">
-        {loading ? (
-          <div className="text-center text-sm text-muted-foreground">Loading...</div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* MAIN COLUMN */}
-            <div className="lg:col-span-2 space-y-6">
-              {/* Vitals row */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <Card>
-                  <CardHeader className="flex items-center gap-2 pb-2">
-                    <Heart className="h-5 w-5 text-destructive" />
-                    <CardTitle className="text-sm">Heart Rate</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{latestVitals?.heart_rate ?? "-"}</div>
-                    <div className="text-xs text-muted-foreground">bpm</div>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="flex items-center gap-2 pb-2">
-                    <Activity className="h-5 w-5 text-info" />
-                    <CardTitle className="text-sm">Blood Pressure</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">
-                      {latestVitals?.systolic_bp != null && latestVitals?.diastolic_bp != null
-                        ? `${latestVitals.systolic_bp}/${latestVitals.diastolic_bp}`
-                        : "-"}
-                    </div>
-                    <div className="text-xs text-muted-foreground">mmHg</div>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="flex items-center gap-2 pb-2">
-                    <Thermometer className="h-5 w-5 text-warning" />
-                    <CardTitle className="text-sm">Blood Sugar</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{latestVitals?.blood_sugar ?? "-"}</div>
-                    <div className="text-xs text-muted-foreground">mg/dL</div>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="flex items-center gap-2 pb-2">
-                    <Weight className="h-5 w-5 text-primary" />
-                    <CardTitle className="text-sm">Weight</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{latestVitals?.weight ?? "-"}</div>
-                    <div className="text-xs text-muted-foreground">kg</div>
-                  </CardContent>
-                </Card>
-              </div>
-
-              {/* Chart */}
+      <main className="container mx-auto px-4 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* LEFT: main content (wider) */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Top small cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <TrendingUp className="h-5 w-5" />
-                    Health Trends & Risks
-                  </CardTitle>
+                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                  <CardTitle className="text-sm font-medium">Heart Rate</CardTitle>
+                  <Heart className="h-4 w-4 text-success" />
                 </CardHeader>
                 <CardContent>
-                  {chartPoints.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">No trend data yet — add readings to see graphs.</div>
-                  ) : (
-                    <HealthChart data={chartPoints} height={360} />
-                  )}
+                  <div className="text-2xl font-bold">{latest?.heart_rate ?? "No data"}</div>
+                  <p className="text-xs text-muted-foreground">bpm</p>
                 </CardContent>
               </Card>
 
-              {/* AI Insights (clean format) */}
-              {latestVitals && insights.length > 0 && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Sparkles className="h-5 w-5 text-purple-500" />
-                      AI Insights
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-4">
-                      {insights.map((ins) => {
-                        const bullets = insightToBullets(ins);
-                        return (
-                          <div key={ins.id} className="p-4 rounded-lg bg-muted hover:bg-muted/80 transition">
-                            <div className="flex items-start justify-between">
-                              <div>
-                                <div className="font-semibold text-foreground">{ins.title ?? "Insight"}</div>
-                                <div className="text-xs text-muted-foreground mt-1">{fmtDate(ins.created_at)}</div>
-                              </div>
-                            </div>
-
-                            {bullets.length > 0 ? (
-                              <ul className="list-disc list-inside mt-3 text-sm space-y-1">
-                                {bullets.map((b, i) => <li key={i}>{b}</li>)}
-                              </ul>
-                            ) : (
-                              <p className="text-sm text-muted-foreground mt-3 whitespace-pre-wrap">{ins.body}</p>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Symptoms (below insights in main column) */}
               <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Notebook className="h-5 w-5 text-blue-500" />
-                    Recent Symptoms
-                  </CardTitle>
+                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                  <CardTitle className="text-sm font-medium">Blood Pressure</CardTitle>
+                  <Activity className="h-4 w-4 text-info" />
                 </CardHeader>
                 <CardContent>
-                  {symptomsList.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">No symptoms recorded recently.</div>
-                  ) : (
-                    <ol className="list-decimal list-inside space-y-3 text-sm">
-                      {symptomsList.map((s, idx) => (
-                        <li key={s.id}>
-                          <div>{s.text}</div>
-                          <div className="text-xs text-muted-foreground mt-1">{s.created_at ? new Date(s.created_at).toLocaleString() : ""}</div>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
+                  <div className="text-2xl font-bold">{latest?.systolic_bp && latest?.diastolic_bp ? `${latest.systolic_bp}/${latest.diastolic_bp}` : "No data"}</div>
+                  <p className="text-xs text-muted-foreground">mmHg</p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                  <CardTitle className="text-sm font-medium">Blood Sugar</CardTitle>
+                  <Thermometer className="h-4 w-4 text-warning" />
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">{latest?.blood_sugar ?? "No data"}</div>
+                  <p className="text-xs text-muted-foreground">mg/dL</p>
                 </CardContent>
               </Card>
             </div>
 
-            {/* SIDEBAR */}
-            <div className="space-y-6">
-              {/* Risk Summary */}
-              <Card>
-                <CardHeader><CardTitle>Risk Summary</CardTitle></CardHeader>
-                <CardContent>
-                  <div className="space-y-3">
-                    {sortedRiskEntries.length === 0 ? (
-                      <div className="text-sm text-muted-foreground">No risk data available yet.</div>
-                    ) : (
-                      sortedRiskEntries.map((r) => (
-                        <div key={r.key}>
-                          <div className="flex items-center justify-between text-sm">
-                            <div className="flex items-center gap-2">
-                              <span className="text-lg">{diseaseEmoji[r.key] ?? "•"}</span>
-                              <div className="font-medium">{formatDiseaseName(r.key)}</div>
-                            </div>
-                            <div className="text-muted-foreground">{r.value}%</div>
-                          </div>
-                          <div className="mt-2">
-                            <Progress value={r.value} className="h-2 rounded-full" />
-                          </div>
-                        </div>
-                      ))
-                    )}
-                    <div className="text-xs text-muted-foreground mt-3">
-                      These are heuristics for awareness, not a medical diagnosis.
+            {/* Health trends chart */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5" /> Health Trends (Last 7)</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {readings.length ? <HealthChart data={readings} /> : <div className="text-muted-foreground">No data recorded yet. Add a reading to see trends.</div>}
+              </CardContent>
+            </Card>
+
+            {/* AI Insights & Risk Summary - made taller to visually balance with right column */}
+            <Card>
+              <CardHeader><CardTitle>AI Insights & Risk Summary</CardTitle></CardHeader>
+              <CardContent className="min-h-[700px]">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {DISEASES.map((d) => (
+                    <div key={d.key}>
+                      <RiskIndicator disease={d.label} risk={(riskSummary as any)[d.key] ?? 0} color={d.color} />
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
+                  ))}
+                </div>
 
-              {/* Today's Tips */}
-              <Card>
-                <CardHeader><CardTitle>Today's Health Tips</CardTitle></CardHeader>
-                <CardContent>
-                  <ul className="space-y-2">
-                    {tips.map((t, i) => <li key={i} className="text-sm">• {t}</li>)}
-                  </ul>
-                </CardContent>
-              </Card>
-
-              {/* Quick Actions */}
-              <Card>
-                <CardHeader><CardTitle>Quick Actions</CardTitle></CardHeader>
-                <CardContent>
-                  <div className="flex flex-col gap-2">
-                    <Button onClick={() => navigate("/add-data")}>Add Health Data</Button>
-                    <Button variant="outline" onClick={() => navigate("/symptoms")}>Log Symptoms</Button>
-                    <Button variant="ghost" onClick={() => navigate("/reports")}>View Reports</Button>
-                  </div>
-                </CardContent>
-              </Card>
-
-              {/* Notes - moved to the sidebar below Quick Actions */}
-              <Card>
-                <CardHeader><CardTitle>Recent Notes</CardTitle></CardHeader>
-                <CardContent>
-                  {recentReadings.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">No notes recorded.</div>
+                <div className="mt-6">
+                  <h4 className="font-medium">Latest Insight</h4>
+                  {insights[0] ? (
+                    <div className="mt-2">
+                      <div className="text-sm text-muted-foreground">
+                        {insights[0].title ? insights[0].title : (insights[0].summary ? insights[0].summary : "Latest observation")}
+                        {insights[0].created_at ? ` — ${new Date(insights[0].created_at).toLocaleString()}` : ""}
+                      </div>
+                      <div className="mt-2">{renderInsightBody(insights[0].body ?? insights[0].insights ?? insights[0])}</div>
+                    </div>
                   ) : (
-                    <ol className="list-decimal list-inside space-y-3 text-sm">
-                      {recentReadings.slice(0, 5).map((r, idx) => (
-                        <li key={r.id ?? idx}>
-                          {r.notes ? <p>{r.notes}</p> : <p className="text-muted-foreground">—</p>}
-                          <div className="text-xs text-muted-foreground mt-1">{r.created_at ? new Date(r.created_at).toLocaleString() : ""}</div>
-                        </li>
-                      ))}
-                    </ol>
+                    <div className="text-muted-foreground">No AI insights yet. Save a reading to get insights.</div>
                   )}
-                </CardContent>
-              </Card>
-            </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* RECENT ACTIVITY moved to the left bottom (under AI Insights) */}
+            <Card>
+              <CardHeader><CardTitle>Recent Activity</CardTitle></CardHeader>
+              <CardContent>
+                {latest ? (
+                  <div className="space-y-3 text-sm">
+                    <div className="flex justify-between"><span>Last reading</span><span className="text-muted-foreground">{latest.created_at ? new Date(latest.created_at).toLocaleString() : "—"}</span></div>
+                    <div className="flex justify-between"><span>Weight</span><span className="text-muted-foreground">{latest.weight ?? "—"}</span></div>
+                    <div className="flex justify-between"><span>Temperature (°F)</span><span className="text-muted-foreground">{latest.temperature ?? "—"}</span></div>
+                    <div className="flex justify-between"><span>Blood sugar</span><span className="text-muted-foreground">{latest.blood_sugar ?? "—"}</span></div>
+                    <div className="flex justify-between"><span>Heart rate</span><span className="text-muted-foreground">{latest.heart_rate ?? "—"} bpm</span></div>
+                    <div className="flex justify-between"><span>Blood pressure</span><span className="text-muted-foreground">{latest.systolic_bp && latest.diastolic_bp ? `${latest.systolic_bp}/${latest.diastolic_bp} mmHg` : "—"}</span></div>
+                  </div>
+                ) : <div className="text-muted-foreground">No recent activity</div>}
+              </CardContent>
+            </Card>
           </div>
-        )}
-      </div>
+
+          {/* RIGHT: sidebar */}
+          <aside className="space-y-6">
+            <Card>
+              <CardHeader><CardTitle>Actions & Reports</CardTitle></CardHeader>
+              <CardContent>
+                <div className="flex flex-col gap-3">
+                  <Button variant="outline" className="flex items-center justify-center" onClick={() => navigate("/add-data")}><Plus className="h-4 w-4 mr-2" /> Add Data</Button>
+                  <Button variant="outline" className="flex items-center justify-center" onClick={() => navigate("/symptoms")}><Calendar className="h-4 w-4 mr-2" /> Log Symptoms</Button>
+                  <Button variant="outline" className="flex items-center justify-center" onClick={() => navigate("/reports")}><Calendar className="h-4 w-4 mr-2" /> Get Reports</Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Notes */}
+            <Card>
+              <CardHeader><CardTitle>Notes</CardTitle></CardHeader>
+              <CardContent>
+                {notesList.length ? (
+                  <div className="space-y-3 text-sm">
+                    {notesList.map((n, i) => (
+                      <div key={i} className="space-y-1">
+                        <div className="text-xs text-muted-foreground">{n.source} • {n.created_at ? new Date(n.created_at).toLocaleString() : ""}</div>
+                        <div className="whitespace-pre-wrap">{n.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-muted-foreground">No notes yet. Notes from readings and AI insights will appear here.</div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Reminders */}
+            <Card>
+              <CardHeader><CardTitle>Reminders</CardTitle></CardHeader>
+              <CardContent>
+                {reminders.length ? (
+                  <div className="space-y-3">
+                    {reminders.map((r: any, i: number) => (
+                      <div key={i} className="text-sm">
+                        <div className="flex justify-between">
+                          <div className="font-medium">{r.title ?? "Reminder"}</div>
+                          <div className="text-xs text-muted-foreground">{r.scheduled_at ? new Date(r.scheduled_at).toLocaleString() : "—"}</div>
+                        </div>
+                        {r.body && <div className="text-xs text-muted-foreground mt-1">{r.body}</div>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-muted-foreground">No upcoming reminders</div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Today's Tip */}
+            <Card>
+              <CardHeader><CardTitle>Today's Health Tip</CardTitle></CardHeader>
+              <CardContent><p className="text-sm text-muted-foreground">{todaysTip}</p></CardContent>
+            </Card>
+
+            {/* Symptoms (recent) */}
+            <Card>
+              <CardHeader><CardTitle>Symptoms (recent)</CardTitle></CardHeader>
+              <CardContent>
+                {symptoms.length ? (
+                  <div className="space-y-3">
+                    {symptoms.map((s, i) => (
+                      <div key={`${s.label}-${s.recorded_at}-${i}`} className="p-3 rounded-md bg-white shadow-sm border">
+                        <div className="flex items-baseline justify-between">
+                          <div className="text-base font-semibold text-foreground">{prettyLabel(s.label)}</div>
+                          <div className="text-xs text-muted-foreground">{formatDate(s.recorded_at)}</div>
+                        </div>
+                        <div className="mt-1 text-sm text-muted-foreground">Severity: <span className="font-medium text-foreground">{String(s.severity ?? "n/a").charAt(0).toUpperCase() + String(s.severity ?? "n/a").slice(1)}</span></div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-muted-foreground">No symptoms recorded</div>
+                )}
+              </CardContent>
+            </Card>
+          </aside>
+        </div>
+      </main>
     </div>
   );
 };

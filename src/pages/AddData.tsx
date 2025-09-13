@@ -1,6 +1,7 @@
 // src/pages/AddData.tsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { supabase } from "@/lib/supabaseClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,259 +10,135 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Heart, ArrowLeft, Save } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { supabase } from "@/lib/supabaseClient";
-import agentLib from "@/lib/agent"; // optional; guard before use
-
-type FormState = {
-  heartRate: string;
-  systolicBP: string;
-  diastolicBP: string;
-  bloodSugar: string;
-  weight: string;
-  height: string;
-  temperature: string;
-  sleepHours: string;
-  exerciseMinutes: string;
-  mood: string;
-  symptoms: string; // free text (comma/newline) -> will be parsed to array
-  medications: string;
-  notes: string;
-  diet?: string;
-  activity?: string;
-  oxygenSaturation?: string;
-  respirationRate?: string;
-};
-
-const DEFAULT_STATE: FormState = {
-  heartRate: "",
-  systolicBP: "",
-  diastolicBP: "",
-  bloodSugar: "",
-  weight: "",
-  height: "",
-  temperature: "",
-  sleepHours: "",
-  exerciseMinutes: "",
-  mood: "",
-  symptoms: "",
-  medications: "",
-  notes: "",
-  diet: "",
-  activity: "",
-  oxygenSaturation: "",
-  respirationRate: ""
-};
-
-const parseSymptomsToArray = (input: string) => {
-  if (!input) return [];
-  // accept newline, semicolon or comma separated lists
-  const items = input
-    .split(/\r?\n|;/)
-    .map((s) => s.split(","))
-    .flat()
-    .map((s) => s.trim())
-    .filter(Boolean);
-  // dedupe while preserving order
-  const seen = new Set<string>();
-  return items.filter((i) => (seen.has(i) ? false : seen.add(i)));
-};
 
 const AddData: React.FC = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [formData, setFormData] = useState<FormState>({ ...DEFAULT_STATE });
-  const [saving, setSaving] = useState(false);
 
-  const handleInputChange = (field: keyof FormState, value: string) => {
-    setFormData((p) => ({ ...p, [field]: value }));
-  };
+  const [userId, setUserId] = useState<string | null>(null);
 
-  const getAuthUser = async () => {
-    try {
-      const { data, error } = await supabase.auth.getUser();
-      if (error) {
-        console.warn("supabase.auth.getUser error:", error);
-        return null;
+  const [formData, setFormData] = useState({
+    heartRate: "",
+    systolicBP: "",
+    diastolicBP: "",
+    bloodSugar: "",
+    bloodSugarType: "fasting", // or random/pp
+    weight: "",
+    height: "", // store as cms if you collect
+    temperature: "", // expected in °F
+    sleepHours: "",
+    exerciseMinutes: "",
+    mood: "",
+    symptomsText: "", // free text (stored as text in health_data.symptoms)
+    medications: "",
+    notes: ""
+  });
+
+  useEffect(() => {
+    const loadUser = async () => {
+      try {
+        const { data } = await supabase.auth.getUser();
+        const uid = data?.user?.id ?? null;
+        if (!uid) {
+          // try local storage fallback (if you use it)
+          try {
+            const local = JSON.parse(localStorage.getItem("user") || "null");
+            if (local?.id) setUserId(local.id);
+            else navigate("/");
+          } catch {
+            navigate("/");
+          }
+        } else {
+          setUserId(uid);
+        }
+      } catch (e) {
+        console.warn("getUser error", e);
+        navigate("/");
       }
-      return data?.user ?? null;
-    } catch (e) {
-      console.error("getAuthUser exception:", e);
-      return null;
-    }
+    };
+    loadUser();
+  }, [navigate]);
+
+  const handleInputChange = (field: string, value: string) => {
+    setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaving(true);
+
+    if (!userId) {
+      toast({
+        title: "Not signed in",
+        description: "You must be signed in to save health data.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    // Validate some required fields optionally
+    // e.g. heartRate or blood pressure
+    const payload: any = {
+      user_id: userId,
+      heart_rate: formData.heartRate ? Number(formData.heartRate) : null,
+      systolic_bp: formData.systolicBP ? Number(formData.systolicBP) : null,
+      diastolic_bp: formData.diastolicBP ? Number(formData.diastolicBP) : null,
+      blood_sugar: formData.bloodSugar ? Number(formData.bloodSugar) : null,
+      blood_sugar_type: formData.bloodSugarType || null,
+      weight: formData.weight ? Number(formData.weight) : null,
+      height: formData.height ? Number(formData.height) : null,
+      temperature: formData.temperature ? Number(formData.temperature) : null, // °F
+      sleep_hours: formData.sleepHours ? Number(formData.sleepHours) : null,
+      exercise_minutes: formData.exerciseMinutes ? Number(formData.exerciseMinutes) : null,
+      mood: formData.mood || null,
+      symptoms: formData.symptomsText ? String(formData.symptomsText) : null, // store as free text in health_data
+      medications: formData.medications ? String(formData.medications) : null,
+      notes: formData.notes ? String(formData.notes) : null,
+      date: new Date().toISOString().split("T")[0] // YYYY-MM-DD
+    };
+
+    // Remove keys that are null to keep insert payload small
+    Object.keys(payload).forEach((k) => {
+      if (payload[k] === null) delete payload[k];
+    });
 
     try {
-      const authUser = await getAuthUser();
+      // Insert into health_data
+      const { data, error } = await supabase.from("health_data").insert([payload]).select().single();
 
-      // fallback to localStorage if needed (dev)
-      let userId = authUser?.id ?? null;
-      let userEmail = authUser?.email ?? null;
-      if (!userId) {
-        try {
-          const local = JSON.parse(localStorage.getItem("user") || "null");
-          userId = local?.id ?? local?.userId ?? local?.uid ?? null;
-          userEmail = userEmail ?? local?.email ?? null;
-        } catch {}
-      }
-
-      if (!userId) {
-        toast({ title: "Not signed in", description: "Please sign in before adding data", variant: "destructive" });
-        setSaving(false);
+      if (error) {
+        console.error("AddData save error", error);
+        toast({
+          title: "Save failed",
+          description: error.message || "Failed to save health data",
+          variant: "destructive"
+        });
         return;
       }
 
-      // prepare row - types match your schema
-      const row = {
-        user_id: userId,
-        heart_rate: formData.heartRate ? parseInt(formData.heartRate, 10) : null,
-        systolic_bp: formData.systolicBP ? parseInt(formData.systolicBP, 10) : null,
-        diastolic_bp: formData.diastolicBP ? parseInt(formData.diastolicBP, 10) : null,
-        blood_sugar: formData.bloodSugar ? parseInt(formData.bloodSugar, 10) : null,
-        weight: formData.weight ? Math.round(Number(formData.weight)) : null,
-        height: formData.height ? Math.round(Number(formData.height)) : null,
-        temperature: formData.temperature ? Number(formData.temperature) : null,
-        sleep_hours: formData.sleepHours ? Number(formData.sleepHours) : null,
-        exercise_minutes: formData.exerciseMinutes ? parseInt(formData.exerciseMinutes, 10) : null,
-        mood: formData.mood || null,
-        // symptoms stored as JSON array (jsonb)
-        symptoms: parseSymptomsToArray(formData.symptoms),
-        medications: formData.medications || null,
-        notes: formData.notes || null,
-        diet: formData.diet || null,
-        activity: formData.activity || null,
-        oxygen_saturation: formData.oxygenSaturation ? Number(formData.oxygenSaturation) : null,
-        respiration_rate: formData.respirationRate ? Number(formData.respirationRate) : null,
-        created_at: new Date().toISOString(),
-        timestamp: new Date().toISOString(),
-        date: new Date().toISOString().slice(0, 10)
-      };
+      toast({
+        title: "Health Data Saved",
+        description: "Your health information has been saved successfully.",
+        variant: "default"
+      });
 
-      console.info("Inserting health_data:", row);
+      // Optionally: create a health_insights row (you may have a serverless function to compute insights)
+      // For now we leave that to other processes or to the agent.
 
-      // Insert row; do not set id (DB default should create it)
-      const { data: insertRes, error: insertErr } = await supabase.from("health_data").insert([row]).select().single();
-
-      if (insertErr) {
-        console.error("Supabase insert error:", insertErr);
-        // translate common errors
-        if (insertErr.message?.includes("invalid input syntax for type uuid")) {
-          throw new Error("Invalid user id — make sure you're signed in (Supabase auth user.id should be used).");
-        }
-        throw insertErr;
-      }
-
-      const saved = insertRes;
-      console.info("Saved reading:", saved);
-
-      // compute risks if agent available (best-effort)
-      let risks: Record<string, number> = {};
-      try {
-        if (agentLib && typeof agentLib.computeRisks === "function") {
-          risks = await Promise.resolve(agentLib.computeRisks(saved));
-        }
-      } catch (err) {
-        console.warn("computeRisks failed:", err);
-      }
-
-      // persist insight (best-effort)
-      try {
-        await supabase.from("health_insights").insert([{
-          user_id: userId,
-          title: "Reading recorded",
-          body: JSON.stringify({ reading: saved, risks }),
-          insights: risks || {},
-          created_at: new Date().toISOString(),
-          source: "client"
-        }]);
-      } catch (insErr) {
-        console.warn("could not insert health_insight:", insErr);
-      }
-
-      // create in-app notification
-      try {
-        await supabase.from("notifications").insert([{
-          user_id: userId,
-          title: "New health reading saved",
-          body: `Saved vitals — HR: ${row.heart_rate ?? "-"}, BP: ${row.systolic_bp ?? "-"} / ${row.diastolic_bp ?? "-"}, Sugar: ${row.blood_sugar ?? "-"}`,
-          level: "info",
-          channel: "in-app",
-          data: { readingId: saved.id, risks }
-        }]);
-      } catch (nErr) {
-        console.warn("notification insert failed:", nErr);
-      }
-
-      // fetch caregivers & collect recipients
-      let recipients: string[] = [];
-      try {
-        // look up caregivers linked to this user (supports patient_id or user_id columns)
-        const q = await supabase.from("caregivers").select("email").or(`user_id.eq.${userId},patient_id.eq.${userId}`);
-        if (!q.error && Array.isArray(q.data)) {
-          recipients = q.data.map((r: any) => r.email).filter(Boolean);
-        }
-      } catch (e) {
-        console.warn("caregiver fetch failed:", e);
-      }
-      // add patient email
-      if (userEmail) recipients.unshift(userEmail);
-
-      // If urgent risk, notify patient + caregivers via /api/notify (one request)
-      const maxRisk = Object.keys(risks).length ? Math.max(...Object.values(risks)) : 0;
-      const urgent = maxRisk >= 80;
-      const moderate = maxRisk >= 50 && maxRisk < 80;
-
-      if (urgent && recipients.length > 0) {
-        try {
-          const resp = await fetch("/api/notify", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              to: recipients,
-              title: "Urgent Health Alert — Early Health Guardian",
-              body: `Urgent reading detected.\n\nRisks:\n${JSON.stringify(risks, null, 2)}\n\nIf this is an emergency call 112 (India).`,
-              meta: { userId, readingId: saved.id }
-            })
-          });
-          const j = await resp.json();
-          console.info("/api/notify response:", j);
-        } catch (err) {
-          console.warn("notify request failed:", err);
-        }
-      }
-
-      if (moderate) {
-        // schedule follow-up reminder
-        try {
-          const scheduledAt = new Date();
-          scheduledAt.setDate(scheduledAt.getDate() + 3);
-          await supabase.from("reminders").insert([{
-            user_id: userId,
-            title: "Follow-up: re-check health readings",
-            body: "Please re-enter your vitals so we can check trends.",
-            scheduled_at: scheduledAt.toISOString(),
-            metadata: { readingId: saved.id }
-          }]);
-        } catch (rErr) {
-          console.warn("reminder creation failed:", rErr);
-        }
-      }
-
-      toast({ title: "Health Data Saved", description: "Your information has been recorded.", variant: "default" });
+      // Navigate back to dashboard
       navigate("/dashboard");
     } catch (err: any) {
-      console.error("AddData error:", err);
-      toast({ title: "Save failed", description: err?.message || "Could not save health data", variant: "destructive" });
-    } finally {
-      setSaving(false);
+      console.error("AddData unexpected error", err);
+      toast({
+        title: "Save failed",
+        description: err?.message ?? "Unexpected error saving data",
+        variant: "destructive"
+      });
     }
   };
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Header */}
       <header className="border-b bg-card">
         <div className="container mx-auto px-4 py-4 flex items-center gap-4">
           <Button variant="ghost" size="sm" onClick={() => navigate("/dashboard")}>
@@ -275,11 +152,13 @@ const AddData: React.FC = () => {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-6 max-w-4xl">
+      <div className="container mx-auto px-4 py-6 max-w-4xl">
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Vital Signs */}
           <Card>
-            <CardHeader><CardTitle>Vital Signs</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle>Vital Signs</CardTitle>
+            </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div className="space-y-2">
@@ -303,13 +182,15 @@ const AddData: React.FC = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="oxygenSaturation">Oxygen Saturation (%)</Label>
-                  <Input id="oxygenSaturation" type="number" step="0.1" placeholder="98" value={formData.oxygenSaturation} onChange={(e) => handleInputChange("oxygenSaturation", e.target.value)} />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="respirationRate">Respiration Rate</Label>
-                  <Input id="respirationRate" type="number" placeholder="16" value={formData.respirationRate} onChange={(e) => handleInputChange("respirationRate", e.target.value)} />
+                  <Label htmlFor="bloodSugarType">Blood Sugar Type</Label>
+                  <Select value={formData.bloodSugarType} onValueChange={(val) => handleInputChange("bloodSugarType", val)}>
+                    <SelectTrigger><SelectValue placeholder="Type" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="fasting">Fasting</SelectItem>
+                      <SelectItem value="random">Random</SelectItem>
+                      <SelectItem value="pp">Post-prandial</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="space-y-2">
@@ -323,14 +204,14 @@ const AddData: React.FC = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="temperature">Temperature (°C)</Label>
-                  <Input id="temperature" type="number" step="0.1" placeholder="37.0" value={formData.temperature} onChange={(e) => handleInputChange("temperature", e.target.value)} />
+                  <Label htmlFor="temperature">Temperature (°F)</Label>
+                  <Input id="temperature" type="number" step="0.1" placeholder="98.6" value={formData.temperature} onChange={(e) => handleInputChange("temperature", e.target.value)} />
                 </div>
               </div>
             </CardContent>
           </Card>
 
-          {/* Lifestyle & Symptoms & Notes */}
+          {/* Lifestyle */}
           <Card>
             <CardHeader><CardTitle>Lifestyle & Wellness</CardTitle></CardHeader>
             <CardContent>
@@ -347,57 +228,51 @@ const AddData: React.FC = () => {
 
                 <div className="space-y-2">
                   <Label htmlFor="mood">Mood</Label>
-                  <Select value={formData.mood} onValueChange={(v) => handleInputChange("mood", v)}>
+                  <Select value={formData.mood} onValueChange={(val) => handleInputChange("mood", val)}>
                     <SelectTrigger><SelectValue placeholder="Select your mood" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="excellent">Excellent</SelectItem>
                       <SelectItem value="good">Good</SelectItem>
                       <SelectItem value="fair">Fair</SelectItem>
                       <SelectItem value="poor">Poor</SelectItem>
-                      <SelectItem value="very-poor">Very Poor</SelectItem>
                     </SelectContent>
                   </Select>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="diet">Diet</Label>
-                  <Input id="diet" value={formData.diet} onChange={(e) => handleInputChange("diet", e.target.value)} placeholder="e.g., low sugar" />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="activity">Activity</Label>
-                  <Input id="activity" value={formData.activity} onChange={(e) => handleInputChange("activity", e.target.value)} placeholder="e.g., walked 2km" />
                 </div>
               </div>
             </CardContent>
           </Card>
 
+          {/* Symptoms & Notes */}
           <Card>
             <CardHeader><CardTitle>Symptoms & Additional Information</CardTitle></CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="symptoms">Symptoms (comma/line separated)</Label>
-                <Textarea id="symptoms" rows={4} placeholder="e.g., chest pain; shortness of breath" value={formData.symptoms} onChange={(e) => handleInputChange("symptoms", e.target.value)} />
+                <Label htmlFor="symptomsText">Current Symptoms (free text)</Label>
+                <Textarea id="symptomsText" placeholder="Describe any symptoms..." value={formData.symptomsText} onChange={(e) => handleInputChange("symptomsText", e.target.value)} />
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="medications">Medications Taken</Label>
-                <Textarea id="medications" rows={2} placeholder="List medications" value={formData.medications} onChange={(e) => handleInputChange("medications", e.target.value)} />
+                <Textarea id="medications" placeholder="List medications taken today..." value={formData.medications} onChange={(e) => handleInputChange("medications", e.target.value)} />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="notes">Notes</Label>
-                <Textarea id="notes" rows={3} value={formData.notes} onChange={(e) => handleInputChange("notes", e.target.value)} />
+                <Label htmlFor="notes">Additional Notes</Label>
+                <Textarea id="notes" placeholder="Any other health-related observations..." value={formData.notes} onChange={(e) => handleInputChange("notes", e.target.value)} />
               </div>
             </CardContent>
           </Card>
 
+          {/* Submit */}
           <div className="flex justify-end gap-4">
             <Button type="button" variant="outline" onClick={() => navigate("/dashboard")}>Cancel</Button>
-            <Button type="submit" disabled={saving}><Save className="h-4 w-4 mr-2" />{saving ? "Saving..." : "Save Health Data"}</Button>
+            <Button type="submit">
+              <Save className="h-4 w-4 mr-2" />
+              Save Health Data
+            </Button>
           </div>
         </form>
-      </main>
+      </div>
     </div>
   );
 };

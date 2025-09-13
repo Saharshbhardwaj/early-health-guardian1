@@ -1,195 +1,121 @@
 // src/components/HealthChart.tsx
-import React, { useMemo } from "react";
+import React from "react";
+import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
-  TimeScale,
   PointElement,
   LineElement,
+  Title,
   Tooltip,
-  Legend,
-  Filler,
-  ChartOptions,
-  ChartData,
-  ScriptableContext
+  Legend
 } from "chart.js";
-import "chartjs-adapter-date-fns";
-import { Line } from "react-chartjs-2";
 
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  TimeScale,
-  PointElement,
-  LineElement,
-  Tooltip,
-  Legend,
-  Filler
-);
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
-export type HealthChartDatum = {
-  date: string; // ISO or parseable date string
-  heartRate?: number | null;
-  sugar?: number | null;
-  bp?: string | null;
-  risks?: { [k: string]: number } | null;
+type Reading = {
+  created_at?: string;
+  heart_rate?: number | null;
+  blood_sugar?: number | null;
+  systolic_bp?: number | null;
+  diastolic_bp?: number | null;
+  temperature?: number | null;
 };
 
-type Props = {
-  data: HealthChartDatum[];
-  height?: number;
-};
-
-const DEFAULT_COLORS = [
-  "#ef4444", // red
-  "#0ea5a4", // teal
-  "#f59e0b", // amber
-  "#6366f1", // indigo
-  "#10b981", // green
-  "#ef6aa7", // pink
-  "#06b6d4", // cyan
-  "#8b5cf6", // violet
-];
-
-function pickColor(idx: number) {
-  return DEFAULT_COLORS[idx % DEFAULT_COLORS.length];
-}
-
-export const HealthChart: React.FC<Props> = ({ data, height = 320 }) => {
-  // normalize and sort by date asc
-  const normalized = useMemo(() => {
-    if (!Array.isArray(data)) return [];
-    const parsed = data
-      .map((d) => {
-        const dateVal = d?.date ? new Date(d.date).getTime() : NaN;
-        return {
-          ...d,
-          dateVal,
-          heartRate: d.heartRate == null ? null : Number(d.heartRate),
-          sugar: d.sugar == null ? null : Number(d.sugar),
-          risks: d.risks ?? null,
-          bp: d.bp ?? null
-        };
-      })
-      .filter((d) => !Number.isNaN(d.dateVal))
-      .sort((a, b) => a.dateVal - b.dateVal);
-    return parsed;
-  }, [data]);
-
-  const labels = normalized.map((d) => new Date(d.dateVal).toISOString());
-
-  // collect unique risk keys across points (preserve order)
-  const riskKeys = useMemo(() => {
-    const set = new Set<string>();
-    normalized.forEach((pt) => {
-      if (pt.risks && typeof pt.risks === "object") {
-        Object.keys(pt.risks).forEach((k) => set.add(k));
-      }
-    });
-    return Array.from(set);
-  }, [normalized]);
-
-  // define datasets: vitals first, then risks
-  const datasets: ChartData<"line">["datasets"] = [];
-
-  // Heart Rate dataset (left axis)
-  datasets.push({
-    label: "Heart Rate (bpm)",
-    data: normalized.map((d) => (d.heartRate ?? null)),
-    yAxisID: "y",
-    tension: 0.3,
-    fill: true,
-    borderColor: pickColor(0),
-    backgroundColor: (ctx: ScriptableContext<"line">) => {
-      const c = pickColor(0);
-      return c + "33";
-    },
-    pointRadius: 3,
-    spanGaps: true,
+export const HealthChart: React.FC<{ data: Reading[] }> = ({ data }) => {
+  // Ensure ascending chronological order for chart
+  const sorted = [...(data || [])].sort((a, b) => {
+    const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+    return ta - tb;
   });
 
-  // Blood Sugar dataset (left axis)
-  datasets.push({
-    label: "Blood Sugar (mg/dL)",
-    data: normalized.map((d) => (d.sugar ?? null)),
-    yAxisID: "y",
-    tension: 0.25,
-    fill: false,
-    borderColor: pickColor(1),
-    pointRadius: 2,
-    spanGaps: true,
-  });
+  const labels = sorted.map((r) => (r.created_at ? new Date(r.created_at).toLocaleString() : ""));
 
-  // Risk datasets (right axis 0..100)
-  riskKeys.forEach((rk, idx) => {
-    const color = pickColor(2 + idx);
-    datasets.push({
-      label: `${rk}`,
-      data: normalized.map((d) => (d.risks && typeof d.risks === "object" ? (d.risks[rk] ?? null) : null)),
-      yAxisID: "yRisk",
-      tension: 0.35,
-      fill: false,
-      borderColor: color,
-      backgroundColor: color,
-      pointRadius: 2,
-      borderDash: [4, 4],
-      spanGaps: true,
-    });
-  });
+  const heartData = sorted.map((r) => (typeof r.heart_rate === "number" ? r.heart_rate : null));
+  const sugarData = sorted.map((r) => (typeof r.blood_sugar === "number" ? r.blood_sugar : null));
+  const systolicData = sorted.map((r) => (typeof r.systolic_bp === "number" ? r.systolic_bp : null));
+  const diastolicData = sorted.map((r) => (typeof r.diastolic_bp === "number" ? r.diastolic_bp : null));
+  const tempData = sorted.map((r) => (typeof r.temperature === "number" ? r.temperature : null));
 
-  const chartData: ChartData<"line"> = {
+  const chartData = {
     labels,
-    datasets,
+    datasets: [
+      {
+        label: "Heart Rate (bpm)",
+        data: heartData,
+        tension: 0.2,
+        fill: false,
+        borderWidth: 2,
+        borderColor: "#ef4444", // red
+        pointBackgroundColor: "#ef4444"
+      },
+      {
+        label: "Blood Sugar (mg/dL)",
+        data: sugarData,
+        tension: 0.2,
+        fill: false,
+        borderWidth: 2,
+        borderColor: "#f59e0b", // orange
+        pointBackgroundColor: "#f59e0b"
+      },
+      {
+        label: "Systolic BP (mmHg)",
+        data: systolicData,
+        tension: 0.2,
+        fill: false,
+        borderWidth: 1.5,
+        borderDash: [6, 4],
+        borderColor: "#3b82f6", // blue
+        pointBackgroundColor: "#3b82f6"
+      },
+      {
+        label: "Diastolic BP (mmHg)",
+        data: diastolicData,
+        tension: 0.2,
+        fill: false,
+        borderWidth: 1.5,
+        borderDash: [3, 3],
+        borderColor: "#60a5fa", // lighter blue
+        pointBackgroundColor: "#60a5fa"
+      },
+      {
+        label: "Temperature (°F)",
+        data: tempData,
+        tension: 0.2,
+        fill: false,
+        borderWidth: 1.5,
+        borderColor: "#10b981", // green
+        pointBackgroundColor: "#10b981"
+      }
+    ]
   };
 
-  const options: ChartOptions<"line"> = {
+  const options: any = {
     responsive: true,
     maintainAspectRatio: false,
-    interaction: { mode: "index", intersect: false },
     plugins: {
-      legend: { position: "top", labels: { boxWidth: 12, padding: 12 } },
-      tooltip: {
-        callbacks: {
-          label: (ctx) => {
-            const label = ctx.dataset.label ?? "";
-            const val = ctx.parsed.y;
-            const idx = ctx.dataIndex ?? 0;
-            const bpVal = normalized[idx]?.bp;
-            const unit = label.includes("Heart") ? " bpm" : label.includes("Sugar") ? " mg/dL" : "%";
-            return bpVal && (label.includes("Heart") || label.includes("Sugar"))
-              ? `${label}: ${val}${unit} — BP: ${bpVal}`
-              : `${label}: ${val}${unit}`;
-          },
-        },
-      },
+      legend: { position: "top" },
+      title: { display: false },
+      tooltip: { mode: "index", intersect: false }
     },
+    interaction: { mode: "index", intersect: false },
     scales: {
       x: {
-        type: "time",
-        time: { unit: normalized.length <= 7 ? "day" : "day", tooltipFormat: "PP p" },
+        ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 7 }
       },
       y: {
-        position: "left",
-        title: { display: true, text: "Vitals" },
-        beginAtZero: false,
-      },
-      yRisk: {
-        position: "right",
-        title: { display: true, text: "Risk (%)" },
-        min: 0,
-        max: 100,
-        grid: { drawOnChartArea: false },
-      },
-    },
+        beginAtZero: false
+      }
+    }
   };
 
   return (
-    <div style={{ height }}>
+    <div style={{ width: "100%", minHeight: 300 }}>
       <Line data={chartData} options={options} />
     </div>
   );
 };
 
-// both named and default export so other files can import either way
 export default HealthChart;
