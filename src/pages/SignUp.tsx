@@ -1,7 +1,7 @@
 // src/pages/Signup.tsx
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/lib/supabaseClient"; // adjust if your path differs
+import { supabase } from "@/lib/supabaseClient"; // adjust path if needed
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,7 +32,7 @@ const Signup: React.FC = () => {
     }
 
     try {
-      // 1) create auth user (this triggers confirmation email if enabled)
+      // 1) create auth user (Supabase handles the auth.users row)
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
@@ -44,26 +44,25 @@ const Signup: React.FC = () => {
         return;
       }
 
-      // Attempt to get a final user object (some Supabase flows require email confirmation)
-      // We'll call getUser() to fetch the current user object if available
+      // Try to obtain the user ID. In some Supabase setups the user needs email confirmation,
+      // so the session may not be active yet. We attempt to fetch the current user object.
       const { data: currentUserData } = await supabase.auth.getUser();
-      const user = currentUserData?.user ?? (signUpData?.user ?? null);
-      const userId = user?.id ?? null;
+      const maybeUser = currentUserData?.user ?? (signUpData?.user ?? null);
+      const userId = maybeUser?.id ?? null;
 
+      // If we don't have a confirmed user/session, redirect to login and ask user to confirm email.
       if (!userId) {
-        // If auth requires email confirmation, inform user to confirm and finish later.
         toast({
-          title: "Signup created",
-          description: "Please check your email to confirm your account before continuing.",
+          title: "Account created",
+          description: "Please confirm your email (check inbox). Then log in.",
           variant: "default",
         });
-        // We cannot insert profile/caregiver until the user is confirmed and has a session in many setups.
         navigate("/login");
         return;
       }
 
-      // 2) Insert into profiles (patient info)
-      // Use only columns that exist in your profiles table: id, full_name, age, sex, created_at
+      // 2) UPSERT into profiles (so duplicate-primary-key doesn't error)
+      // Use columns that exist in your profiles table: id, full_name, age, sex, created_at
       const profilePayload = {
         id: userId,
         full_name: fullName || null,
@@ -72,24 +71,26 @@ const Signup: React.FC = () => {
         created_at: new Date().toISOString(),
       };
 
-      const { data: profileInsert, error: profileError } = await supabase
+      // upsert will insert or update on conflict (key = id)
+      const { data: profileUpserted, error: profileError } = await supabase
         .from("profiles")
-        .insert([profilePayload])
+        .upsert([profilePayload], { onConflict: "id" })
         .select()
         .single();
 
       if (profileError) {
-        console.error("Error inserting profile:", profileError);
-        toast({ title: "Profile setup failed", description: profileError.message, variant: "destructive" });
-        // continue — caregiver insert should be attempted even if profile insert fails (depending on policy)
+        console.error("profiles upsert error", profileError);
+        toast({ title: "Profile save failed", description: profileError.message, variant: "destructive" });
+        // continue to caregiver attempt (we do not bail out)
+      } else {
+        // success — optionally toast or continue silently
+        console.log("Profile upserted:", profileUpserted);
       }
 
       // 3) Insert caregiver row (if caregiver info provided)
-      // Use patient_id to link to the patient (your schema has patient_id)
+      // Link via patient_id (your schema uses patient_id)
       if (caregiverName || caregiverEmail || caregiverPhone) {
         const caregiverPayload: any = {
-          // if your caregivers table expects both user_id and patient_id, we set patient_id explicitly.
-          // leave caregiver_user_id as null unless caregiver has its own auth account.
           patient_id: userId,
           name: caregiverName || null,
           email: caregiverEmail || null,
@@ -105,15 +106,16 @@ const Signup: React.FC = () => {
           .single();
 
         if (caregiverError) {
-          console.error("Error inserting caregiver:", caregiverError);
+          console.error("caregivers insert error", caregiverError);
           toast({ title: "Caregiver save failed", description: caregiverError.message, variant: "destructive" });
         } else {
+          console.log("Caregiver saved:", caregiverInsert);
           toast({ title: "Caregiver saved", variant: "default" });
         }
       }
 
-      toast({ title: "Signup successful", description: "Account created. Please confirm email if required.", variant: "default" });
-      navigate("/login");
+      toast({ title: "Signup successful", description: "Account created and profile saved.", variant: "default" });
+      navigate("/dashboard");
     } catch (err: any) {
       console.error("Unexpected error during signup:", err);
       toast({ title: "Signup error", description: String(err), variant: "destructive" });
@@ -137,7 +139,11 @@ const Signup: React.FC = () => {
               <div className="grid grid-cols-3 gap-4">
                 <div>
                   <Label>Age</Label>
-                  <Input type="number" value={age as any} onChange={(e) => setAge(e.target.value === "" ? "" : Number(e.target.value))} />
+                  <Input
+                    type="number"
+                    value={age as any}
+                    onChange={(e) => setAge(e.target.value === "" ? "" : Number(e.target.value))}
+                  />
                 </div>
                 <div>
                   <Label>Sex</Label>
