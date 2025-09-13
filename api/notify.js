@@ -1,60 +1,56 @@
 // api/notify.js
-import fetch from "node-fetch"; // Vercel Node has fetch, but include for local dev
-export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
-  const { to, channel, title, body, meta } = req.body || {};
-  if (!to || !channel) return res.status(400).json({ error: "missing to/channel" });
+// Top-level Vercel serverless function (plain Node). Use with Vercel (no Next.js).
+// Uses Resend: https://resend.com
+
+const { Resend } = require("resend");
+
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || "no-reply@earlyhealthguardian.app";
+
+let resend = null;
+if (RESEND_API_KEY) {
+  resend = new Resend(RESEND_API_KEY);
+} else {
+  console.warn("RESEND_API_KEY not set — /api/notify will fail until configured.");
+}
+
+function sendJson(res, status, payload) {
+  res.status(status).setHeader("Content-Type", "application/json").end(JSON.stringify(payload));
+}
+
+// Basic sanitiser for HTML display
+function escapeHtml(s = "") {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+module.exports = async (req, res) => {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+
+  let body = req.body;
+  // if Vercel gives raw body as string, try parse
+  if (typeof body === "string") {
+    try { body = JSON.parse(body); } catch (e) { /* ignore */ }
+  }
+
+  const to = body?.to;
+  const title = body?.title || "Notification from Early Health Guardian";
+  const text = body?.body || "";
+
+  if (!to) return sendJson(res, 400, { error: 'Missing required field "to" (recipient email)' });
+  if (!resend) return sendJson(res, 500, { error: "Email provider not configured (RESEND_API_KEY missing)" });
 
   try {
-    if (channel === "email") {
-      const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
-      if (!SENDGRID_API_KEY) throw new Error("Missing SENDGRID_API_KEY env");
-      const payload = {
-        personalizations: [{ to: [{ email: to }] }],
-        from: { email: process.env.NOTIFY_FROM_EMAIL || "no-reply@earlyhealthguardian.app" },
-        subject: title || "Early Health Guardian Alert",
-        content: [{ type: "text/plain", value: body || "" }]
-      };
-      const r = await fetch("https://api.sendgrid.com/v3/mail/send", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${SENDGRID_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      if (!r.ok) {
-        const txt = await r.text();
-        console.error("sendgrid error", txt);
-        return res.status(500).json({ error: "sendgrid failed", detail: txt });
-      }
-      return res.status(200).json({ ok: true });
-    } else if (channel === "sms") {
-      const accountSid = process.env.TWILIO_ACCOUNT_SID;
-      const authToken = process.env.TWILIO_AUTH_TOKEN;
-      const from = process.env.TWILIO_FROM;
-      if (!accountSid || !authToken || !from) throw new Error("Missing Twilio env vars");
-      const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
-      const form = new URLSearchParams();
-      form.append("From", from);
-      form.append("To", to);
-      form.append("Body", title + "\n\n" + body);
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: "Basic " + Buffer.from(accountSid + ":" + authToken).toString("base64"),
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: form.toString()
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        console.error("twilio error", payload);
-        return res.status(500).json({ error: "twilio failed", detail: payload });
-      }
-      return res.status(200).json({ ok: true, sid: payload.sid });
-    } else {
-      return res.status(400).json({ error: "unsupported channel" });
-    }
-  } catch (e) {
-    console.error("notify error", e);
-    return res.status(500).json({ error: String(e) });
+    const resp = await resend.emails.send({
+      from: FROM_EMAIL,
+      to,
+      subject: title,
+      text,
+      html: `<div style="font-family:system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; line-height:1.4">${escapeHtml(text).replace(/\n/g, "<br/>")}</div>`,
+    });
+
+    return sendJson(res, 200, { ok: true, resp });
+  } catch (err) {
+    console.error("resend send error:", err);
+    return sendJson(res, 500, { error: err?.message || "Failed to send email", details: err });
   }
-}
+};

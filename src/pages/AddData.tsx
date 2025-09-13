@@ -12,12 +12,22 @@ import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/lib/supabaseClient";
 import agentLib from "@/lib/agent";
 
+/**
+ * Full AddData page.
+ * - Insert into health_data
+ * - Compute risks (agentLib.computeRisks)
+ * - Persist insight in health_insights
+ * - Create notifications and call /api/notify (email) for patient+caregivers if urgent
+ * - Schedule reminder for moderate risk
+ */
+
 type FormState = {
   heartRate: string;
   systolicBP: string;
   diastolicBP: string;
   bloodSugar: string;
   weight: string;
+  height: string;
   temperature: string;
   sleepHours: string;
   exerciseMinutes: string;
@@ -25,31 +35,57 @@ type FormState = {
   symptoms: string;
   medications: string;
   notes: string;
+  diet?: string;
+  activity?: string;
+  oxygenSaturation?: string;
+  respirationRate?: string;
+};
+
+const DEFAULT_STATE: FormState = {
+  heartRate: "",
+  systolicBP: "",
+  diastolicBP: "",
+  bloodSugar: "",
+  weight: "",
+  height: "",
+  temperature: "",
+  sleepHours: "",
+  exerciseMinutes: "",
+  mood: "",
+  symptoms: "",
+  medications: "",
+  notes: "",
+  diet: "",
+  activity: "",
+  oxygenSaturation: "",
+  respirationRate: ""
 };
 
 const AddData: React.FC = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const [formData, setFormData] = useState<FormState>({
-    heartRate: "",
-    systolicBP: "",
-    diastolicBP: "",
-    bloodSugar: "",
-    weight: "",
-    temperature: "",
-    sleepHours: "",
-    exerciseMinutes: "",
-    mood: "",
-    symptoms: "",
-    medications: "",
-    notes: ""
-  });
-
+  const [formData, setFormData] = useState<FormState>({ ...DEFAULT_STATE });
   const [saving, setSaving] = useState(false);
 
   const handleInputChange = (field: keyof FormState, value: string) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+    setFormData((p) => ({ ...p, [field]: value }));
+  };
+
+  const getCurrentUserId = async (): Promise<string | null> => {
+    try {
+      const { data } = await supabase.auth.getUser();
+      const uid = data?.user?.id ?? null;
+      if (uid) return uid;
+    } catch (e) {
+      // fallback to localStorage if present
+    }
+    try {
+      const local = JSON.parse(localStorage.getItem("user") || "null");
+      return local?.userId ?? local?.id ?? null;
+    } catch (e) {
+      return null;
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -57,13 +93,18 @@ const AddData: React.FC = () => {
     setSaving(true);
 
     try {
-      // Get currently authenticated user
-      const { data: userResp, error: userErr } = await supabase.auth.getUser();
-      if (userErr) throw userErr;
-      const userId = userResp?.user?.id;
-      if (!userId) throw new Error("Not logged in. Please sign in to add data.");
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        toast({
+          title: "Not signed in",
+          description: "Please sign in before adding health data.",
+          variant: "destructive"
+        });
+        setSaving(false);
+        return;
+      }
 
-      // Build row for health_data
+      // build insert row with nulls for missing fields and typed numbers
       const row = {
         user_id: userId,
         heart_rate: formData.heartRate ? Number(formData.heartRate) : null,
@@ -71,6 +112,7 @@ const AddData: React.FC = () => {
         diastolic_bp: formData.diastolicBP ? Number(formData.diastolicBP) : null,
         blood_sugar: formData.bloodSugar ? Number(formData.bloodSugar) : null,
         weight: formData.weight ? Number(formData.weight) : null,
+        height: formData.height ? Number(formData.height) : null,
         temperature: formData.temperature ? Number(formData.temperature) : null,
         sleep_hours: formData.sleepHours ? Number(formData.sleepHours) : null,
         exercise_minutes: formData.exerciseMinutes ? Number(formData.exerciseMinutes) : null,
@@ -78,18 +120,146 @@ const AddData: React.FC = () => {
         symptoms: formData.symptoms || null,
         medications: formData.medications || null,
         notes: formData.notes || null,
+        diet: formData.diet || null,
+        activity: formData.activity || null,
+        oxygen_saturation: formData.oxygenSaturation ? Number(formData.oxygenSaturation) : null,
+        respiration_rate: formData.respirationRate ? Number(formData.respirationRate) : null,
         created_at: new Date().toISOString(),
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        date: new Date().toISOString().slice(0, 10)
       };
 
-      // Insert into health_data
-      const { data: insertData, error: insertError } = await supabase
-        .from("health_data")
-        .insert([row])
-        .select()
-        .single();
+      // insert into db
+      const { data: insertRes, error: insertErr } = await supabase.from("health_data").insert([row]).select().single();
 
-      if (insertError) throw insertError;
+      if (insertErr) throw insertErr;
+
+      // compute risks using your agent library (synchronous or lightweight)
+      let risks: Record<string, number> = {};
+      try {
+        // agentLib.computeRisks should accept the row and return risk percentages
+        risks = agentLib.computeRisks?.(row) ?? {};
+      } catch (agentErr) {
+        console.warn("agent computeRisks failed", agentErr);
+      }
+
+      // persist insight
+      try {
+        await supabase.from("health_insights").insert([{
+          user_id: userId,
+          title: "Reading recorded",
+          body: JSON.stringify({ risks, reading: row }),
+          insights: risks,
+          created_at: new Date().toISOString(),
+          source: "client"
+        }]);
+      } catch (insErr) {
+        console.warn("failed to insert insight", insErr);
+      }
+
+      // create in-app notification for patient
+      try {
+        await supabase.from("notifications").insert([{
+          user_id: userId,
+          title: "New health reading recorded",
+          body: `A new reading was saved. Key vitals — HR: ${row.heart_rate ?? "—"}, BP: ${row.systolic_bp ?? "—"}/${row.diastolic_bp ?? "—"}, Sugar: ${row.blood_sugar ?? "—"}.`,
+          level: "info",
+          channel: "in-app",
+          data: { readingId: insertRes?.id ?? null, risks }
+        }]);
+      } catch (notifErr) {
+        console.warn("failed to create in-app notification", notifErr);
+      }
+
+      // fetch caregivers for this patient (try both user_id and patient_id columns)
+      let caregivers: any[] = [];
+      try {
+        const caregiversQuery = await supabase
+          .from("caregivers")
+          .select("id,name,email,phone,caregiver_user_id")
+          .or(`user_id.eq.${userId},patient_id.eq.${userId}`);
+        if (!caregiversQuery.error && Array.isArray(caregiversQuery.data)) caregivers = caregiversQuery.data;
+      } catch (e) {
+        console.warn("error fetching caregivers", e);
+      }
+
+      // Decide urgency thresholds (you can adjust rules inside agentLib.shouldAlert if available)
+      const maxRisk = Object.values(risks).length ? Math.max(...Object.values(risks)) : 0;
+
+      // If urgent, create urgent notifications and send email to patient + caregivers
+      const urgent = maxRisk >= 80;   // threshold for urgent
+      const moderate = maxRisk >= 50 && maxRisk < 80;
+
+      if (urgent) {
+        // add urgent in-app notification
+        try {
+          await supabase.from("notifications").insert([{
+            user_id: userId,
+            title: "Urgent: abnormal health reading",
+            body: `An urgent reading was detected (risk snapshot: ${JSON.stringify(risks)}).`,
+            level: "urgent",
+            channel: "in-app",
+            data: { readingId: insertRes?.id ?? null, risks }
+          }]);
+        } catch (err) {
+          console.warn("failed urgent notification insert", err);
+        }
+
+        // gather recipient emails (patient + caregivers if present)
+        let patientEmail: string | null = null;
+        try {
+          // try auth user email
+          const { data: authData } = await supabase.auth.getUser();
+          patientEmail = authData?.user?.email ?? null;
+        } catch (e) {
+          // fallback to localStorage user
+        }
+        if (!patientEmail) {
+          try {
+            const local = JSON.parse(localStorage.getItem("user") || "null");
+            patientEmail = local?.email ?? null;
+          } catch (e) { /* ignore */ }
+        }
+
+        const recipientEmails = new Set<string>();
+        if (patientEmail) recipientEmails.add(patientEmail);
+        caregivers.forEach((c) => { if (c?.email) recipientEmails.add(c.email); });
+
+        // send emails via server endpoint /api/notify (Resend)
+        for (const to of Array.from(recipientEmails)) {
+          try {
+            await fetch("/api/notify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                to,
+                title: "Urgent Health Alert — Early Health Guardian",
+                body: `An urgent health reading was detected for patient.\n\nSummary:\n${JSON.stringify(risks, null, 2)}\n\nPlease check the dashboard or contact the patient. If the patient is in immediate danger, call local emergency services (India): 112.`,
+                meta: { userId, readingId: insertRes?.id ?? null }
+              })
+            });
+          } catch (sendErr) {
+            console.warn("failed to call /api/notify", sendErr);
+          }
+        }
+      }
+
+      // For moderate risk schedule a followup reminder
+      if (moderate) {
+        try {
+          const scheduledAt = new Date();
+          scheduledAt.setDate(scheduledAt.getDate() + 3); // 3 days
+          await supabase.from("reminders").insert([{
+            user_id: userId,
+            title: "Follow-up: re-check health readings",
+            body: "Please re-enter your vitals so we can check trends.",
+            scheduled_at: scheduledAt.toISOString(),
+            metadata: { triggeredByReading: insertRes?.id ?? null }
+          }]);
+        } catch (remErr) {
+          console.warn("failed to schedule reminder", remErr);
+        }
+      }
 
       toast({
         title: "Health Data Saved",
@@ -97,172 +267,9 @@ const AddData: React.FC = () => {
         variant: "default"
       });
 
-      // --- Agentic actions start ---
-
-      // Compute risk snapshot
-      const risks = agentLib.computeRisks(row);
-
-      // Format insight text
-      const insightTitle = "Health reading recorded";
-      const insightBody = agentLib.formatInsightText(insightTitle, risks, row);
-
-      // Persist insight to health_insights
-      try {
-        await agentLib.createInsightForUser(userId, insightTitle, insightBody, { risks, vitals: row }, "client");
-      } catch (insErr) {
-        console.warn("createInsightForUser failed:", insErr);
-      }
-
-      // Create an in-app notification for the patient
-      try {
-        await supabase.from("notifications").insert([{
-          user_id: userId,
-          title: "Health alert: new reading",
-          body: insightBody,
-          level: "info",
-          channel: "in-app",
-          data: { risks, readingId: insertData?.id ?? null }
-        }]);
-      } catch (notifErr) {
-        console.warn("Failed to insert patient notification:", notifErr);
-      }
-
-      // If urgent thresholds met, escalate (in-app + external via /api/notify) to patient + caregivers
-      const urgent = agentLib.shouldAlert(risks);
-      if (urgent) {
-        // mark patient notification as urgent
-        try {
-          await supabase.from("notifications").insert([{
-            user_id: userId,
-            title: "Urgent: abnormal health reading",
-            body: insightBody,
-            level: "urgent",
-            channel: "in-app",
-            data: { risks, readingId: insertData?.id ?? null }
-          }]);
-        } catch (err) {
-          console.warn("Failed to insert urgent notification for patient:", err);
-        }
-
-        // Attempt to fetch patient's email (profile table) - optional, may not exist
-        let patientEmail: string | null = null;
-        try {
-          const { data: profile, error: profileErr } = await supabase.from("profiles").select("email").eq("id", userId).single();
-          if (!profileErr && profile?.email) patientEmail = profile.email;
-        } catch (e) {
-          // ignore; fallback to auth user email below
-        }
-        if (!patientEmail) {
-          try {
-            const { data: authUserResp } = await supabase.auth.getUser();
-            patientEmail = authUserResp?.user?.email ?? null;
-          } catch (e) { /* ignore */ }
-        }
-
-        // Notify patient externally if email exists
-        if (patientEmail) {
-          try {
-            await fetch("/api/notify", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                to: patientEmail,
-                channel: "email",
-                title: "Urgent: abnormal health reading recorded",
-                body: `An urgent health reading was recorded:\n\n${insightBody}\n\nIf you feel unwell, seek medical attention.`,
-                meta: { userId, readingId: insertData?.id ?? null }
-              })
-            });
-          } catch (err) {
-            console.warn("External notify (patient) failed:", err);
-          }
-        }
-
-        // Find caregivers for this user and notify them
-        try {
-          const { data: carers, error: carersErr } = await supabase.from("caregivers").select("*").eq("user_id", userId);
-          if (!carersErr && Array.isArray(carers) && carers.length > 0) {
-            for (const c of carers) {
-              // in-app notification for caregiver (if caregiver_user_id present, use that)
-              try {
-                await supabase.from("notifications").insert([{
-                  user_id: c.caregiver_user_id ?? null,
-                  related_user_id: userId,
-                  title: `Patient alert: ${c.name ?? "Your patient"}`,
-                  body: insightBody,
-                  level: "urgent",
-                  channel: "in-app",
-                  data: { patientId: userId, readingId: insertData?.id ?? null }
-                }]);
-              } catch (err) {
-                console.warn("Failed to insert caregiver in-app notification:", err);
-              }
-
-              // external delivery: email then sms fallback
-              if (c.email) {
-                try {
-                  await fetch("/api/notify", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      to: c.email,
-                      channel: "email",
-                      title: `Urgent: patient ${c.name ?? ""} reading`,
-                      body: `An urgent reading was recorded for your patient:\n\n${insightBody}\n\nPlease check the Early Health Guardian dashboard for details.`,
-                      meta: { patientId: userId, caregiverId: c.id }
-                    })
-                  });
-                } catch (err) {
-                  console.warn("notify caregiver email failed:", err);
-                }
-              }
-              if (c.phone) {
-                try {
-                  await fetch("/api/notify", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      to: c.phone,
-                      channel: "sms",
-                      title: `Urgent: patient reading`,
-                      body: insightBody,
-                      meta: { patientId: userId, caregiverId: c.id }
-                    })
-                  });
-                } catch (err) {
-                  console.warn("notify caregiver sms failed:", err);
-                }
-              }
-            }
-          }
-        } catch (err) {
-          console.warn("Fetching caregivers failed:", err);
-        }
-      } // end urgent
-
-      // Schedule follow-up reminder for moderate risk
-      try {
-        const moderate = (risks.diabetes ?? 0) >= 50 || (risks.hypertension ?? 0) >= 50 || (risks.heartDisease ?? 0) >= 50;
-        if (moderate) {
-          const scheduledAt = new Date();
-          scheduledAt.setDate(scheduledAt.getDate() + 3);
-          await supabase.from("reminders").insert([{
-            user_id: userId,
-            title: "Follow-up: re-check health readings",
-            body: "Please re-enter your vitals so we can track trends.",
-            scheduled_at: scheduledAt.toISOString(),
-            metadata: { triggeredByReading: insertData?.id ?? null }
-          }]);
-        }
-      } catch (err) {
-        console.warn("Scheduling reminder failed:", err);
-      }
-
-      // --- Agentic actions end ---
-
       navigate("/dashboard");
     } catch (err: any) {
-      console.error("save error", err);
+      console.error("AddData save error", err);
       toast({
         title: "Save failed",
         description: err?.message ?? "Could not save health data",
@@ -291,6 +298,7 @@ const AddData: React.FC = () => {
 
       <main className="container mx-auto px-4 py-6 max-w-4xl">
         <form onSubmit={handleSubmit} className="space-y-6">
+
           {/* Vital Signs */}
           <Card>
             <CardHeader>
@@ -319,19 +327,34 @@ const AddData: React.FC = () => {
                 </div>
 
                 <div className="space-y-2">
+                  <Label htmlFor="oxygenSaturation">Oxygen Saturation (%)</Label>
+                  <Input id="oxygenSaturation" type="number" step="0.1" placeholder="98" value={formData.oxygenSaturation} onChange={(e) => handleInputChange("oxygenSaturation", e.target.value)} />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="respirationRate">Respiration Rate (breaths/min)</Label>
+                  <Input id="respirationRate" type="number" placeholder="16" value={formData.respirationRate} onChange={(e) => handleInputChange("respirationRate", e.target.value)} />
+                </div>
+
+                <div className="space-y-2">
                   <Label htmlFor="weight">Weight (kg)</Label>
                   <Input id="weight" type="number" placeholder="70" value={formData.weight} onChange={(e) => handleInputChange("weight", e.target.value)} />
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="temperature">Temperature (°F)</Label>
-                  <Input id="temperature" type="number" step="0.1" placeholder="98.6" value={formData.temperature} onChange={(e) => handleInputChange("temperature", e.target.value)} />
+                  <Label htmlFor="height">Height (cm)</Label>
+                  <Input id="height" type="number" placeholder="170" value={formData.height} onChange={(e) => handleInputChange("height", e.target.value)} />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="temperature">Temperature (°C)</Label>
+                  <Input id="temperature" type="number" step="0.1" placeholder="37.0" value={formData.temperature} onChange={(e) => handleInputChange("temperature", e.target.value)} />
                 </div>
               </div>
             </CardContent>
           </Card>
 
-          {/* Lifestyle */}
+          {/* Lifestyle & Wellness */}
           <Card>
             <CardHeader>
               <CardTitle>Lifestyle & Wellness</CardTitle>
@@ -363,11 +386,21 @@ const AddData: React.FC = () => {
                     </SelectContent>
                   </Select>
                 </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="diet">Diet (optional)</Label>
+                  <Input id="diet" placeholder="e.g., low sugar, vegetarian" value={formData.diet} onChange={(e) => handleInputChange("diet", e.target.value)} />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="activity">Activity (optional)</Label>
+                  <Input id="activity" placeholder="e.g., walked 2km" value={formData.activity} onChange={(e) => handleInputChange("activity", e.target.value)} />
+                </div>
               </div>
             </CardContent>
           </Card>
 
-          {/* Symptoms & Notes */}
+          {/* Symptoms & Meds & Notes */}
           <Card>
             <CardHeader>
               <CardTitle>Symptoms & Additional Information</CardTitle>
