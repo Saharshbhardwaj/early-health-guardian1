@@ -1,177 +1,184 @@
-// src/pages/SignUp.tsx
+// src/pages/Signup.tsx
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/lib/supabaseClient";
+import { supabase } from "@/lib/supabaseClient"; // adjust if your path differs
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 
-const SignUp: React.FC = () => {
-  const navigate = useNavigate();
+const Signup: React.FC = () => {
+  const [fullName, setFullName] = useState("");
+  const [age, setAge] = useState<number | "">("");
+  const [sex, setSex] = useState<"male" | "female" | "other" | "">("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  // caregiver details (optional)
+  const [caregiverName, setCaregiverName] = useState("");
+  const [caregiverEmail, setCaregiverEmail] = useState("");
+  const [caregiverPhone, setCaregiverPhone] = useState("");
+
   const { toast } = useToast();
-  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
 
-  const [form, setForm] = useState({
-    name: "",
-    age: "",
-    sex: "male",
-    email: "",
-    password: "",
-    caregiverName: "",
-    caregiverEmail: "",
-    caregiverPhone: ""
-  });
-
-  const onChange = (k: string, v: string) => setForm((p) => ({ ...p, [k]: v }));
-
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
 
-    if (!form.caregiverName || !form.caregiverEmail) {
-      toast({ title: "Missing caregiver", description: "Please provide caregiver name and email.", variant: "destructive" });
-      setLoading(false);
+    if (!email || !password) {
+      toast({ title: "Please enter email and password", variant: "destructive" });
       return;
     }
 
     try {
+      // 1) create auth user (this triggers confirmation email if enabled)
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email: form.email,
-        password: form.password,
-        options: {
-          data: {
-            full_name: form.name,
-            age: form.age ? Number(form.age) : null,
-            sex: form.sex
-          }
-        }
+        email,
+        password,
       });
 
-      if (signUpError) throw signUpError;
+      if (signUpError) {
+        console.error("Sign up error:", signUpError);
+        toast({ title: "Signup failed", description: signUpError.message, variant: "destructive" });
+        return;
+      }
 
-      const userId = signUpData?.user?.id ?? null;
+      // Attempt to get a final user object (some Supabase flows require email confirmation)
+      // We'll call getUser() to fetch the current user object if available
+      const { data: currentUserData } = await supabase.auth.getUser();
+      const user = currentUserData?.user ?? (signUpData?.user ?? null);
+      const userId = user?.id ?? null;
 
       if (!userId) {
-        toast({ title: "Signup started", description: "Please confirm your email to complete signup.", variant: "default" });
-        setLoading(false);
-        navigate("/");
+        // If auth requires email confirmation, inform user to confirm and finish later.
+        toast({
+          title: "Signup created",
+          description: "Please check your email to confirm your account before continuing.",
+          variant: "default",
+        });
+        // We cannot insert profile/caregiver until the user is confirmed and has a session in many setups.
+        navigate("/login");
         return;
       }
 
+      // 2) Insert into profiles (patient info)
+      // Use only columns that exist in your profiles table: id, full_name, age, sex, created_at
       const profilePayload = {
         id: userId,
-        full_name: form.name,
-        age: form.age ? Number(form.age) : null,
-        sex: form.sex,
-        email: form.email,
-        created_at: new Date().toISOString()
+        full_name: fullName || null,
+        age: age === "" ? null : Number(age),
+        sex: sex || null,
+        created_at: new Date().toISOString(),
       };
-      await supabase.from("profiles").upsert([profilePayload], { onConflict: "id" });
 
-      const caregiverPayload = {
-        user_id: userId,
-        name: form.caregiverName,
-        email: form.caregiverEmail,
-        phone: form.caregiverPhone || null,
-        created_at: new Date().toISOString()
-      };
-      await supabase.from("caregivers").insert([caregiverPayload]);
+      const { data: profileInsert, error: profileError } = await supabase
+        .from("profiles")
+        .insert([profilePayload])
+        .select()
+        .single();
 
-      // Sign-in to create session and store local user
-      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-        email: form.email,
-        password: form.password
-      });
-
-      if (signInError) {
-        toast({ title: "Account created", description: "Please confirm your email to sign in.", variant: "default" });
-        setLoading(false);
-        navigate("/");
-        return;
+      if (profileError) {
+        console.error("Error inserting profile:", profileError);
+        toast({ title: "Profile setup failed", description: profileError.message, variant: "destructive" });
+        // continue — caregiver insert should be attempted even if profile insert fails (depending on policy)
       }
 
-      const loggedUser = signInData?.user ?? signUpData?.user;
-      const localUser = {
-        userId: loggedUser?.id,
-        email: loggedUser?.email,
-        name: form.name || loggedUser?.user_metadata?.full_name || loggedUser?.email,
-        userType: "patient"
-      };
-      localStorage.setItem("user", JSON.stringify(localUser));
-      toast({ title: "Welcome", description: `Signed up as ${localUser.name}`, variant: "default" });
-      setLoading(false);
-      navigate("/dashboard");
+      // 3) Insert caregiver row (if caregiver info provided)
+      // Use patient_id to link to the patient (your schema has patient_id)
+      if (caregiverName || caregiverEmail || caregiverPhone) {
+        const caregiverPayload: any = {
+          // if your caregivers table expects both user_id and patient_id, we set patient_id explicitly.
+          // leave caregiver_user_id as null unless caregiver has its own auth account.
+          patient_id: userId,
+          name: caregiverName || null,
+          email: caregiverEmail || null,
+          phone: caregiverPhone || null,
+          caregiver_user_id: null,
+          created_at: new Date().toISOString(),
+        };
+
+        const { data: caregiverInsert, error: caregiverError } = await supabase
+          .from("caregivers")
+          .insert([caregiverPayload])
+          .select()
+          .single();
+
+        if (caregiverError) {
+          console.error("Error inserting caregiver:", caregiverError);
+          toast({ title: "Caregiver save failed", description: caregiverError.message, variant: "destructive" });
+        } else {
+          toast({ title: "Caregiver saved", variant: "default" });
+        }
+      }
+
+      toast({ title: "Signup successful", description: "Account created. Please confirm email if required.", variant: "default" });
+      navigate("/login");
     } catch (err: any) {
-      console.error("signup failed", err);
-      toast({ title: "Signup failed", description: err?.message ?? "Could not create account", variant: "destructive" });
-      setLoading(false);
+      console.error("Unexpected error during signup:", err);
+      toast({ title: "Signup error", description: String(err), variant: "destructive" });
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
+    <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="w-full max-w-2xl">
         <Card>
-          <CardHeader><CardTitle>Create your account</CardTitle></CardHeader>
+          <CardHeader>
+            <CardTitle>Create an account</CardTitle>
+          </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="name">Full name</Label>
-                  <Input id="name" value={form.name} onChange={(e) => onChange("name", e.target.value)} required />
-                </div>
+            <form onSubmit={handleSignup} className="grid gap-4">
+              <div>
+                <Label>Full name</Label>
+                <Input value={fullName} onChange={(e) => setFullName(e.target.value)} />
+              </div>
 
+              <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <Label htmlFor="age">Age</Label>
-                  <Input id="age" type="number" value={form.age} onChange={(e) => onChange("age", e.target.value)} />
+                  <Label>Age</Label>
+                  <Input type="number" value={age as any} onChange={(e) => setAge(e.target.value === "" ? "" : Number(e.target.value))} />
                 </div>
-
                 <div>
-                  <Label htmlFor="sex">Sex</Label>
-                  <select value={form.sex} onChange={(e) => onChange("sex", e.target.value)} className="w-full border rounded px-2 py-1">
+                  <Label>Sex</Label>
+                  <select value={sex} onChange={(e) => setSex(e.target.value as any)} className="w-full border px-2 py-1 rounded">
+                    <option value="">Select</option>
                     <option value="male">Male</option>
                     <option value="female">Female</option>
                     <option value="other">Other</option>
                   </select>
                 </div>
-
-                <div>
-                  <Label htmlFor="email">Email</Label>
-                  <Input id="email" type="email" value={form.email} onChange={(e) => onChange("email", e.target.value)} required />
-                </div>
-
-                <div>
-                  <Label htmlFor="password">Password</Label>
-                  <Input id="password" type="password" value={form.password} onChange={(e) => onChange("password", e.target.value)} required />
-                </div>
+                <div />
               </div>
-
-              <hr />
 
               <div>
-                <h3 className="text-lg font-semibold mb-2">Caregiver / Guardian (required)</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div>
-                    <Label htmlFor="caregiverName">Caregiver name</Label>
-                    <Input id="caregiverName" value={form.caregiverName} onChange={(e) => onChange("caregiverName", e.target.value)} required />
-                  </div>
+                <Label>Email</Label>
+                <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+              </div>
 
-                  <div>
-                    <Label htmlFor="caregiverEmail">Caregiver email</Label>
-                    <Input id="caregiverEmail" type="email" value={form.caregiverEmail} onChange={(e) => onChange("caregiverEmail", e.target.value)} required />
-                  </div>
+              <div>
+                <Label>Password</Label>
+                <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+              </div>
 
-                  <div>
-                    <Label htmlFor="caregiverPhone">Caregiver phone</Label>
-                    <Input id="caregiverPhone" value={form.caregiverPhone} onChange={(e) => onChange("caregiverPhone", e.target.value)} />
-                  </div>
+              <div className="mt-4 border-t pt-4">
+                <h3 className="font-semibold">Caregiver / Guardian (optional)</h3>
+                <div>
+                  <Label>Caregiver name</Label>
+                  <Input value={caregiverName} onChange={(e) => setCaregiverName(e.target.value)} />
+                </div>
+                <div>
+                  <Label>Caregiver email</Label>
+                  <Input value={caregiverEmail} onChange={(e) => setCaregiverEmail(e.target.value)} />
+                </div>
+                <div>
+                  <Label>Caregiver phone</Label>
+                  <Input value={caregiverPhone} onChange={(e) => setCaregiverPhone(e.target.value)} />
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2">
-                <Button type="submit" disabled={loading}>{loading ? "Creating..." : "Create account"}</Button>
+              <div className="flex justify-end">
+                <Button type="submit">Sign up</Button>
               </div>
             </form>
           </CardContent>
@@ -181,4 +188,4 @@ const SignUp: React.FC = () => {
   );
 };
 
-export default SignUp;
+export default Signup;
