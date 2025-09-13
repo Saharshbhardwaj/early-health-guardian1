@@ -1,370 +1,320 @@
 // src/pages/Dashboard.tsx
-import React, { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/lib/supabaseClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Heart, Activity, Thermometer, Plus, Calendar, LogOut, TrendingUp } from "lucide-react";
+import { Heart, Activity, Thermometer, Plus, AlertTriangle, TrendingUp, Calendar, LogOut } from "lucide-react";
 import { HealthChart } from "@/components/HealthChart";
-import RiskIndicator from "@/components/RiskIndicator";
+import  RiskIndicator  from "@/components/RiskIndicator";
 import { useToast } from "@/hooks/use-toast";
-
-/**
- * Dashboard layout adjustments:
- * - Recent Activity card moved from right sidebar into left column (below AI Insights)
- * - AI Insights & Risk Summary card made taller (min-h increased) so it visually matches sidebar height
- * - Two-column disease grid retained
- * - All data fetching/parsing logic unchanged
- */
-
-const HEALTH_TIPS = [
-  "Stay hydrated — aim for 8 cups of water throughout the day.",
-  "Try a short 20-minute walk to improve circulation.",
-  "Reduce processed sugar; choose whole fruits.",
-  "Practice 3 minutes of deep breathing to lower stress.",
-  "Keep consistent sleep times to support memory and recovery.",
-  "Stand and stretch every hour if you sit a lot.",
-  "Light resistance training twice weekly supports heart health.",
-  "Include vegetables and lean protein in your meals."
-];
-
-const DISEASES = [
-  { key: "diabetes", label: "Diabetes", color: "#f59e0b" },
-  { key: "heartDisease", label: "Heart Disease", color: "#ef4444" },
-  { key: "hypertension", label: "Hypertension", color: "#3b82f6" },
-  { key: "stroke", label: "Stroke", color: "#a78bfa" },
-  { key: "alzheimer", label: "Alzheimer's", color: "#06b6d4" },
-  { key: "respiratory", label: "Respiratory (COPD)", color: "#0ea5a4" },
-  { key: "kidney", label: "Kidney Disease", color: "#7c3aed" },
-  { key: "obesity", label: "Obesity", color: "#f97316" },
-  { key: "anemia", label: "Anemia", color: "#ef9a9a" },
-  { key: "osteoporosis", label: "Osteoporosis", color: "#60a5fa" }
-];
-
-const prettyLabel = (slug?: string) => {
-  if (!slug) return "Unknown";
-  return slug
-    .replace(/[-_]/g, " ")
-    .split(" ")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+import UpcomingReminders from "@/components/UpcomingReminders";
+type Profile = {
+  id: string;
+  full_name?: string | null;
+  age?: number | null;
+  sex?: string | null;
 };
 
-const formatDate = (iso?: string) => {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return String(iso);
-  }
+type HealthRow = {
+  id?: string;
+  patient_id?: string;
+  heart_rate?: number | null;
+  systolic_bp?: number | null;
+  diastolic_bp?: number | null;
+  blood_sugar?: number | null;
+  weight?: number | null;
+  temperature?: number | null; // stored in °F
+  sleep_hours?: number | null;
+  exercise_minutes?: number | null;
+  mood?: string | null;
+  symptoms?: string | null;
+  medications?: string | null;
+  notes?: string | null;
+  created_at?: string | null;
+  timestamp?: string | null;
 };
 
-const Dashboard: React.FC = () => {
-  const navigate = useNavigate();
+type Insight = {
+  id?: string;
+  user_id?: string;
+  title?: string | null;
+  summary?: string | null;
+  risk_scores?: string | null; // JSON string
+  created_at?: string | null;
+};
+
+type Reminder = {
+  id: string;
+  title: string;
+  description?: string | null;
+  remind_at: string;
+  repeat?: string | null;
+  sent?: boolean;
+};
+
+export default function Dashboard() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [latestVitals, setLatestVitals] = useState<HealthRow | null>(null);
+  const [recentReadings, setRecentReadings] = useState<Array<{ date: string; heartRate?: number; bp?: string | null; bloodSugar?: number | null }>>([]);
+  const [insights, setInsights] = useState<Insight[]>([]);
+  const [symptomsList, setSymptomsList] = useState<Array<{ id: string; label: string; severity?: string; recorded_at?: string }>>([]);
+  const [notesList, setNotesList] = useState<string[]>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [riskScores, setRiskScores] = useState<{ [k: string]: number }>({ diabetes: 0, heartDisease: 0, alzheimer: 0, hypertension: 0, respiratory: 0 });
+  const [tips, setTips] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
   const { toast } = useToast();
+  const navigate = useNavigate();
 
-  const [user, setUser] = useState<any | null>(null);
-  const [profile, setProfile] = useState<any | null>(null);
-  const [readings, setReadings] = useState<any[]>([]);
-  const [latest, setLatest] = useState<any | null>(null);
-  const [insights, setInsights] = useState<any[]>([]);
-  const [symptoms, setSymptoms] = useState<any[]>([]);
-  const [reminders, setReminders] = useState<any[]>([]);
-  const [tips, setTips] = useState<string[]>(HEALTH_TIPS);
-  const [notesList, setNotesList] = useState<{ source: string; text: string; created_at?: string }[]>([]);
+  // Health tips pool (expanded and varied)
+  const HEALTH_TIPS = [
+    "Stay hydrated — sip water regularly throughout the day.",
+    "Take a short walk after meals to help blood sugar control.",
+    "Practice deep breathing for 3–5 minutes if you feel anxious.",
+    "Stand up and stretch every hour to ease stiffness.",
+    "Maintain a consistent sleep schedule for better recovery.",
+    "Check your medications and keep a daily pill log.",
+    "Limit salty snacks to help keep blood pressure down.",
+    "Include light resistance exercise twice a week if able.",
+    "Measure blood pressure after sitting calmly for 5 minutes.",
+    "If you feel dizzy, sit or lie down immediately and notify caregiver."
+  ];
 
-  useEffect(() => {
-    setTips((t) => {
-      const arr = [...t];
-      for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-      }
-      return arr;
-    });
+  // utility: simple risk scoring from a single reading (not clinical)
+  const computeRiskFromReading = useCallback((p: Profile | null, row: HealthRow | null) => {
+    const baseScores = { diabetes: 0, heartDisease: 0, alzheimer: 0, hypertension: 0, respiratory: 0 };
+    if (!row) return baseScores;
+
+    const sugar = row.blood_sugar ?? null;
+    const sys = row.systolic_bp ?? null;
+    const dia = row.diastolic_bp ?? null;
+    const hr = row.heart_rate ?? null;
+    const temp = row.temperature ?? null;
+    const age = p?.age ?? 60;
+
+    // simple interpretable heuristics
+    if (sugar != null) {
+      // maps higher sugar to diabetes score
+      baseScores.diabetes = Math.min(100, Math.max(0, Math.round((sugar - 80) / 2)));
+    }
+    if (sys != null) {
+      baseScores.hypertension = Math.min(100, Math.max(0, Math.round((sys - 110) / 1.2)));
+      baseScores.heartDisease = Math.min(100, Math.max(0, Math.round(((sys - 120) / 1.5) + (hr ? (hr - 70) / 1.2 : 0))));
+    }
+    // age factor for alzheimer
+    baseScores.alzheimer = Math.min(100, Math.max(0, Math.round((age - 55) * 1.2)));
+    // respiratory crude signal from temperature + hr
+    if (temp != null) {
+      baseScores.respiratory = Math.min(100, Math.max(0, Math.round((temp - 97) * 10)));
+    }
+
+    return baseScores;
   }, []);
 
+  // pick non-repeating tips for the day
+  const pickDailyTips = useCallback(() => {
+    const shuffled = [...HEALTH_TIPS].sort(() => Math.random() - 0.5);
+    const selected = shuffled.slice(0, 4);
+    setTips(selected);
+  }, []);
+
+  // format bp string
+  const formatBP = (r: HealthRow | null) => {
+    if (!r) return "-";
+    if (r.systolic_bp != null && r.diastolic_bp != null) return `${r.systolic_bp}/${r.diastolic_bp}`;
+    return "-";
+  };
+
+  // fetch core data
   useEffect(() => {
-    const loadUser = async () => {
+    let mounted = true;
+    async function loadAll() {
+      setLoading(true);
       try {
-        const { data } = await supabase.auth.getUser();
-        const authUser = data?.user ?? null;
-        if (!authUser) {
-          try {
-            const local = JSON.parse(localStorage.getItem("user") || "null");
-            if (!local) { navigate("/"); return; }
-            setUser({ id: local.id || local.userId || local.uid, email: local.email, name: local.name || local.email });
-          } catch {
-            navigate("/");
-            return;
-          }
-        } else {
-          setUser({ id: authUser.id, email: authUser.email, name: authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email });
-          try {
-            const { data: p, error: pErr } = await supabase.from("profiles").select("*").eq("id", authUser.id).single();
-            if (!pErr && p) setProfile(p);
-            if (p?.full_name) setUser((u: any) => ({ ...u, name: p.full_name }));
-          } catch (e) {
-            console.warn("profile fetch error:", e);
-          }
+        const { data: userData } = await supabase.auth.getUser();
+        const user = userData?.user ?? null;
+        if (!user) {
+          navigate("/");
+          return;
         }
-      } catch (e) {
-        console.error("loadUser error", e);
-        navigate("/");
-      }
-    };
-    loadUser();
-  }, [navigate]);
+        if (!mounted) return;
+        setUserId(user.id);
 
-  useEffect(() => {
-    if (!user?.id) return;
+        // fetch profile
+        const { data: profileData, error: profileErr } = await supabase.from("profiles").select("id,full_name,age,sex").eq("id", user.id).single();
+        if (profileErr && profileErr.code !== "PGRST116") {
+          // PGRST116 sometimes when table missing; still continue gracefully
+          console.warn("profile fetch", profileErr);
+        }
+        const prof = profileData ?? { id: user.id, full_name: user.email };
+        if (mounted) setProfile(prof);
 
-    const fetchAll = async () => {
-      try {
-        const { data: hd, error: hdErr } = await supabase
+        // fetch last 20 readings for display
+        const { data: vitalsData } = await supabase
           .from("health_data")
-          .select("*")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
-          .limit(20);
-
-        if (hdErr) {
-          console.warn("health_data fetch err", hdErr);
-          toast({ title: "Failed to load health data", description: hdErr.message, variant: "destructive" });
-        } else {
-          setReadings(hd || []);
-          setLatest((hd && hd[0]) || null);
-        }
-
-        const { data: ins, error: insErr } = await supabase
-          .from("health_insights")
-          .select("*")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
-          .limit(10);
-
-        if (!insErr && ins) setInsights(ins);
-
-        const { data: s, error: sErr } = await supabase
-          .from("symptoms")
           .select("*")
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(50);
 
-        if (!sErr && Array.isArray(s)) {
-          const flat: any[] = [];
-          s.forEach((entry: any) => {
-            if (Array.isArray(entry.symptoms)) {
-              entry.symptoms.forEach((ss: any) =>
-                flat.push({
-                  label: ss.label ?? ss.id ?? "Unknown symptom",
-                  severity: ss.severity ?? "mild",
-                  recorded_at: entry.created_at
-                })
-              );
-            } else if (entry.symptoms) {
-              flat.push({
-                label: String(entry.symptoms),
-                severity: "n/a",
-                recorded_at: entry.created_at
-              });
-            }
-          });
-          setSymptoms(flat);
-        }
+        const vData: HealthRow[] = vitalsData ?? [];
+        const latest = vData.length ? vData[0] : null;
+        if (mounted) setLatestVitals(latest);
 
-        const { data: remData, error: remErr } = await supabase
+        // prepare recent readings for chart (convert to chronological order, pick last 10)
+        const recent = (vData || []).slice(0, 10).map(r => ({
+          date: r.created_at ?? r.timestamp ?? new Date().toISOString(),
+          heartRate: r.heart_rate ?? undefined,
+          bp: r.systolic_bp != null && r.diastolic_bp != null ? `${r.systolic_bp}/${r.diastolic_bp}` : null,
+          bloodSugar: r.blood_sugar ?? undefined
+        })).reverse();
+        if (mounted) setRecentReadings(recent);
+
+        // compute risk scores from latest
+        const computed = computeRiskFromReading(prof, latest);
+        if (mounted) setRiskScores({
+          diabetes: computed.diabetes,
+          heartDisease: computed.heartDisease,
+          alzheimer: computed.alzheimer,
+          hypertension: computed.hypertension,
+          respiratory: computed.respiratory
+        });
+
+        // fetch health_insights (latest 5)
+        const { data: insightsData } = await supabase
+          .from("health_insights")
+          .select("*")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false })
+          .limit(10);
+        if (mounted) setInsights(insightsData || []);
+
+        // fetch reminders
+        const { data: remindersData } = await supabase
           .from("reminders")
           .select("*")
           .eq("user_id", user.id)
-          .order("scheduled_at", { ascending: true })
-          .limit(10);
-        if (!remErr && Array.isArray(remData)) setReminders(remData);
+          .order("remind_at", { ascending: true })
+          .limit(5);
+        if (mounted) setReminders(remindersData || []);
 
-        // Build notesList
-        const notesArr: { source: string; text: string; created_at?: string }[] = [];
-        if (Array.isArray(hd)) {
-          for (const r of hd.slice(0, 6)) {
-            if (r.notes && String(r.notes).trim() !== "") notesArr.push({ source: "Vitals note", text: String(r.notes), created_at: r.created_at });
-          }
+        // fetch symptoms (if stored in a symptoms table) or parse from latest row
+        // attempt to read a 'symptoms' table first; fallback: use latestVitals.symptoms
+        const { data: symptomsTable } = await supabase.from("symptoms").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(10);
+        if (symptomsTable && symptomsTable.length) {
+          const sList = symptomsTable.map((s: any) => ({ id: s.id || (s.created_at + Math.random()), label: s.label ?? s.symptom, severity: s.severity ?? "mild", recorded_at: s.created_at }));
+          setSymptomsList(sList);
+        } else if (latest?.symptoms) {
+          // parse comma/newline separated notes (keep as readable list)
+          const raw = String(latest.symptoms).trim();
+          const list = raw.split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean).map((t, i) => ({ id: `s-${i}`, label: t, severity: "reported", recorded_at: latest.created_at }));
+          setSymptomsList(list);
+        } else {
+          setSymptomsList([]);
         }
-        if (Array.isArray(ins)) {
-          for (const it of ins.slice(0, 6)) {
-            if (!it.body) continue;
-            let bodyText = "";
-            try {
-              if (typeof it.body === "string") {
-                const parsed = JSON.parse(it.body);
-                if (parsed && (parsed.notes || parsed.summary || parsed.text)) {
-                  if (parsed.notes && String(parsed.notes).trim() !== "") bodyText = String(parsed.notes);
-                  else if (parsed.summary && String(parsed.summary).trim() !== "") bodyText = String(parsed.summary);
-                  else if (parsed.text && String(parsed.text).trim() !== "") bodyText = String(parsed.text);
-                } else {
-                  const nonEmpty = Object.keys(parsed).filter((k) => parsed[k] !== null && parsed[k] !== "" && !(Array.isArray(parsed[k]) && parsed[k].length === 0));
-                  if (nonEmpty.length > 0) bodyText = nonEmpty.map((k) => `${k}: ${JSON.stringify(parsed[k])}`).join("\n");
-                }
-              } else if (typeof it.body === "object") {
-                const parsed = it.body;
-                if (parsed.notes && String(parsed.notes).trim() !== "") bodyText = String(parsed.notes);
-                else if (parsed.summary && String(parsed.summary).trim() !== "") bodyText = String(parsed.summary);
-                else {
-                  const nonEmpty = Object.keys(parsed).filter((k) => parsed[k] !== null && parsed[k] !== "" && !(Array.isArray(parsed[k]) && parsed[k].length === 0));
-                  if (nonEmpty.length > 0) bodyText = nonEmpty.map((k) => `${k}: ${JSON.stringify(parsed[k])}`).join("\n");
-                }
-              } else {
-                bodyText = String(it.body);
-              }
-            } catch {
-              bodyText = String(it.body);
-            }
-            if (bodyText && bodyText.trim() !== "") notesArr.push({ source: "AI insight", text: bodyText, created_at: it.created_at });
-          }
-        }
-        setNotesList(notesArr);
-      } catch (e) {
-        console.error("fetchAll error", e);
+
+        // fetch notes (collect most recent notes from health_data)
+        const notes = (vData || []).map(r => r.notes).filter(Boolean) as string[];
+        setNotesList(notes.slice(0, 5));
+
+        // pick daily tips
+        pickDailyTips();
+
+      } catch (err: any) {
+        console.error("Dashboard load error", err);
+        toast({ title: "Load failed", description: err?.message || String(err), variant: "destructive" });
+      } finally {
+        if (mounted) setLoading(false);
       }
-    };
+    }
 
-    fetchAll();
-  }, [user, toast]);
+    loadAll();
+    return () => { mounted = false; };
+  }, [navigate, toast, computeRiskFromReading, pickDailyTips]);
 
   const handleLogout = async () => {
-    try { await supabase.auth.signOut(); } catch (e) { console.warn(e); }
+    await supabase.auth.signOut();
     localStorage.removeItem("user");
     navigate("/");
   };
 
-  const computeBMI = (r: any) => {
-    const weight = Number(r?.weight ?? 0);
-    const heightCm = Number(r?.height ?? r?.height_cm ?? 0);
-    if (!weight || !heightCm) return null;
-    const m = heightCm / 100;
-    if (!m) return null;
-    return Math.round((weight / (m * m)) * 10) / 10;
+  // useful: format date
+  const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : "-");
+
+  // render symptom list as numbered items
+  const renderSymptoms = () => {
+    if (!symptomsList || symptomsList.length === 0) return <p className="text-sm text-muted-foreground">No symptoms recorded.</p>;
+    return (
+      <ol className="list-decimal list-inside text-sm space-y-1">
+        {symptomsList.map((s) => (
+          <li key={s.id}>
+            <div className="font-semibold">{s.label}</div>
+            <div className="text-xs text-muted-foreground">Severity: {s.severity} · {s.recorded_at ? fmt(s.recorded_at) : "-"}</div>
+          </li>
+        ))}
+      </ol>
+    );
   };
 
-  const riskSummary = React.useMemo(() => {
-    const base: Record<string, number> = {
-      diabetes: 0, heartDisease: 0, hypertension: 0, stroke: 0, alzheimer: 0,
-      respiratory: 0, kidney: 0, obesity: 0, anemia: 0, osteoporosis: 0
-    };
+  // render notes list
+  const renderNotes = () => {
+    if (!notesList || notesList.length === 0) return <p className="text-sm text-muted-foreground">No notes yet.</p>;
+    return (
+      <ul className="text-sm list-decimal list-inside space-y-1">
+        {notesList.map((n, idx) => (<li key={idx}><div>{n}</div></li>))}
+      </ul>
+    );
+  };
 
-    const aiSrc = insights[0]?.insights ?? {};
-    Object.keys(base).forEach((k) => { if (typeof aiSrc[k] === "number") base[k] = Math.round(aiSrc[k]); });
-
-    if (!Object.values(base).some((v) => v > 0) && latest) {
-      const sugar = Number(latest.blood_sugar ?? 0);
-      const hr = Number(latest.heart_rate ?? 0);
-      const sys = Number(latest.systolic_bp ?? 0);
-      const dia = Number(latest.diastolic_bp ?? 0);
-      const bmi = computeBMI(latest);
-
-      if (sugar >= 200) base.diabetes = 95;
-      else if (sugar >= 140) base.diabetes = 70;
-      else if (sugar >= 110) base.diabetes = 40;
-
-      if (hr >= 110) base.heartDisease = 80;
-      else if (hr >= 95) base.heartDisease = 55;
-
-      if (sys >= 160 || dia >= 100) base.hypertension = 95;
-      else if (sys >= 140 || dia >= 90) base.hypertension = 75;
-
-      if (bmi && bmi >= 35) base.obesity = 90;
-      else if (bmi && bmi >= 30) base.obesity = 70;
-      else if (bmi && bmi >= 25) base.obesity = 35;
-    }
-
-    Object.keys(base).forEach((k) => {
-      const v = Number(base[k] || 0);
-      base[k] = Math.max(0, Math.min(100, Math.round(v)));
-    });
-
-    return base;
-  }, [insights, latest, profile, symptoms]);
-
-  const renderInsightBody = (body: any) => {
-    if (!body) return <div className="text-sm text-muted-foreground">No extra details.</div>;
-
-    let parsed: any = body;
-    if (typeof body === "string") {
-      try { parsed = JSON.parse(body); } catch { parsed = body; }
-    }
-
-    if (typeof parsed === "object" && parsed !== null) {
-      const parts: JSX.Element[] = [];
-      const symptomsArr = parsed.symptoms && Array.isArray(parsed.symptoms) ? parsed.symptoms : null;
-      if (symptomsArr && symptomsArr.length > 0) {
-        parts.push(
-          <div key="symptoms">
-            <div className="font-medium text-sm">Symptoms recorded</div>
-            <ol className="list-decimal ml-5 mt-1 text-sm">
-              {symptomsArr.map((s: any, idx: number) => {
-                const label = s.label ?? s.id ?? JSON.stringify(s);
-                const sev = s.severity ? ` — ${s.severity}` : "";
-                return (<li key={idx} className="mb-1">{label}{sev}</li>);
-              })}
-            </ol>
-          </div>
-        );
-      }
-
-      const summaryKeys = ["summary", "text", "notes", "body"];
-      for (const k of summaryKeys) {
-        if (parsed[k] && String(parsed[k]).trim() !== "") {
-          parts.push(
-            <div key={k} className="mt-2">
-              <div className="font-medium text-sm">{k.charAt(0).toUpperCase() + k.slice(1)}</div>
-              <div className="whitespace-pre-wrap text-sm mt-1">{String(parsed[k])}</div>
-            </div>
-          );
-        }
-      }
-
-      if (parts.length === 0) {
-        const nonEmptyKeys = Object.keys(parsed).filter((k) => {
-          const v = parsed[k];
-          if (v === null || v === undefined) return false;
-          if (typeof v === "string") return v.trim() !== "";
-          if (Array.isArray(v)) return v.length > 0;
-          return true;
-        });
-        if (nonEmptyKeys.length > 0) {
-          parts.push(
-            <div key="other">
-              {nonEmptyKeys.map((k) => (
-                <div key={k} className="text-sm mb-1">
-                  <div className="text-xs text-muted-foreground">{k}</div>
-                  <div className="whitespace-pre-wrap">{typeof parsed[k] === "object" ? JSON.stringify(parsed[k], null, 2) : String(parsed[k])}</div>
+  // AI Insights: show human-friendly summary (insights.summary) not raw JSON
+  const renderInsights = () => {
+    if (!insights || insights.length === 0) return <p className="text-sm text-muted-foreground">No AI insights yet. They will appear after you add data.</p>;
+    return (
+      <div className="space-y-3">
+        {insights.map(i => (
+          <Card key={i.id}>
+            <CardContent>
+              <div className="flex justify-between items-start">
+                <div>
+                  <div className="font-semibold">{i.title}</div>
+                  <div className="text-xs text-muted-foreground">{i.created_at ? new Date(i.created_at).toLocaleString() : ""}</div>
                 </div>
-              ))}
-            </div>
-          );
-        } else {
-          return <div className="text-sm text-muted-foreground">No insight details available.</div>;
-        }
-      }
-
-      return <div className="space-y-2">{parts}</div>;
-    }
-
-    return <div className="text-sm">{String(parsed)}</div>;
+                <div className="text-sm text-muted-foreground">{/* small tag area if needed */}</div>
+              </div>
+              <div className="mt-2 text-sm">
+                {i.summary || i.risk_scores || "-"}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    );
   };
 
-  const todaysTip = tips[0] ?? HEALTH_TIPS[0];
+  // if still loading return skeleton-ish null (keeps layout)
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div>Loading dashboard…</div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Header */}
       <header className="border-b bg-card">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Heart className="h-6 w-6 text-primary" />
             <h1 className="text-xl font-semibold">Early Health Guardian</h1>
           </div>
+
           <div className="flex items-center gap-4">
-            <span className="text-sm text-muted-foreground">Welcome, {user?.name ?? user?.email ?? "Patient"}</span>
+            <div className="text-sm text-muted-foreground">Welcome, {profile?.full_name ?? "User"}</div>
             <Badge variant="default">patient</Badge>
             <Button variant="outline" size="sm" onClick={handleLogout}>
               <LogOut className="h-4 w-4 mr-2" /> Logout
@@ -375,187 +325,169 @@ const Dashboard: React.FC = () => {
 
       <main className="container mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* LEFT: main content (wider) */}
+          {/* Main column */}
           <div className="lg:col-span-2 space-y-6">
-            {/* Top small cards */}
+
+            {/* Current vitals row */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Card>
-                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <CardHeader className="flex items-center justify-between pb-2">
                   <CardTitle className="text-sm font-medium">Heart Rate</CardTitle>
                   <Heart className="h-4 w-4 text-success" />
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{latest?.heart_rate ?? "No data"}</div>
+                  <div className="text-2xl font-bold">{latestVitals?.heart_rate ?? "-"}</div>
                   <p className="text-xs text-muted-foreground">bpm</p>
                 </CardContent>
               </Card>
 
               <Card>
-                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <CardHeader className="flex items-center justify-between pb-2">
                   <CardTitle className="text-sm font-medium">Blood Pressure</CardTitle>
                   <Activity className="h-4 w-4 text-info" />
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{latest?.systolic_bp && latest?.diastolic_bp ? `${latest.systolic_bp}/${latest.diastolic_bp}` : "No data"}</div>
+                  <div className="text-2xl font-bold">{formatBP(latestVitals)}</div>
                   <p className="text-xs text-muted-foreground">mmHg</p>
                 </CardContent>
               </Card>
 
               <Card>
-                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <CardHeader className="flex items-center justify-between pb-2">
                   <CardTitle className="text-sm font-medium">Blood Sugar</CardTitle>
                   <Thermometer className="h-4 w-4 text-warning" />
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{latest?.blood_sugar ?? "No data"}</div>
+                  <div className="text-2xl font-bold">{latestVitals?.blood_sugar ?? "-"}</div>
                   <p className="text-xs text-muted-foreground">mg/dL</p>
                 </CardContent>
               </Card>
             </div>
 
-            {/* Health trends chart */}
+            {/* Chart + AI Insights */}
             <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5" /> Health Trends (Last 7)</CardTitle>
+              <CardHeader className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5" /> Health Trends</CardTitle>
+                <div className="text-sm text-muted-foreground">Last {recentReadings.length} readings</div>
               </CardHeader>
               <CardContent>
-                {readings.length ? <HealthChart data={readings} /> : <div className="text-muted-foreground">No data recorded yet. Add a reading to see trends.</div>}
-              </CardContent>
-            </Card>
-
-            {/* AI Insights & Risk Summary - made taller to visually balance with right column */}
-            <Card>
-              <CardHeader><CardTitle>AI Insights & Risk Summary</CardTitle></CardHeader>
-              <CardContent className="min-h-[700px]">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {DISEASES.map((d) => (
-                    <div key={d.key}>
-                      <RiskIndicator disease={d.label} risk={(riskSummary as any)[d.key] ?? 0} color={d.color} />
-                    </div>
-                  ))}
-                </div>
-
-                <div className="mt-6">
-                  <h4 className="font-medium">Latest Insight</h4>
-                  {insights[0] ? (
-                    <div className="mt-2">
-                      <div className="text-sm text-muted-foreground">
-                        {insights[0].title ? insights[0].title : (insights[0].summary ? insights[0].summary : "Latest observation")}
-                        {insights[0].created_at ? ` — ${new Date(insights[0].created_at).toLocaleString()}` : ""}
-                      </div>
-                      <div className="mt-2">{renderInsightBody(insights[0].body ?? insights[0].insights ?? insights[0])}</div>
-                    </div>
-                  ) : (
-                    <div className="text-muted-foreground">No AI insights yet. Save a reading to get insights.</div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* RECENT ACTIVITY moved to the left bottom (under AI Insights) */}
-            <Card>
-              <CardHeader><CardTitle>Recent Activity</CardTitle></CardHeader>
-              <CardContent>
-                {latest ? (
-                  <div className="space-y-3 text-sm">
-                    <div className="flex justify-between"><span>Last reading</span><span className="text-muted-foreground">{latest.created_at ? new Date(latest.created_at).toLocaleString() : "—"}</span></div>
-                    <div className="flex justify-between"><span>Weight</span><span className="text-muted-foreground">{latest.weight ?? "—"}</span></div>
-                    <div className="flex justify-between"><span>Temperature (°F)</span><span className="text-muted-foreground">{latest.temperature ?? "—"}</span></div>
-                    <div className="flex justify-between"><span>Blood sugar</span><span className="text-muted-foreground">{latest.blood_sugar ?? "—"}</span></div>
-                    <div className="flex justify-between"><span>Heart rate</span><span className="text-muted-foreground">{latest.heart_rate ?? "—"} bpm</span></div>
-                    <div className="flex justify-between"><span>Blood pressure</span><span className="text-muted-foreground">{latest.systolic_bp && latest.diastolic_bp ? `${latest.systolic_bp}/${latest.diastolic_bp} mmHg` : "—"}</span></div>
+                <div className="space-y-4">
+                  <div>
+                    <HealthChart data={recentReadings} />
                   </div>
-                ) : <div className="text-muted-foreground">No recent activity</div>}
+
+                  {/* AI Insights placed under chart for symmetry */}
+                  <div>
+                    <h3 className="text-md font-semibold mb-2">AI Insights</h3>
+                    {renderInsights()}
+                  </div>
+                </div>
               </CardContent>
             </Card>
+
+            {/* Quick actions */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Quick Actions</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <Button variant="outline" className="h-20 flex flex-col items-center gap-2" onClick={() => navigate("/add-data")}>
+                    <Plus className="h-6 w-6" />
+                    Add Health Data
+                  </Button>
+                  <Button variant="outline" className="h-20 flex flex-col items-center gap-2" onClick={() => navigate("/symptoms")}>
+                    <Activity className="h-6 w-6" />
+                    Log Symptoms
+                  </Button>
+                  <Button variant="outline" className="h-20 flex flex-col items-center gap-2" onClick={() => navigate("/reports")}>
+                    <Calendar className="h-6 w-6" />
+                    View Reports
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Symptoms and notes area - symptoms below AI insights as requested */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Recent Symptoms</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {renderSymptoms()}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Notes</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {renderNotes()}
+                </CardContent>
+              </Card>
+            </div>
+
           </div>
 
-          {/* RIGHT: sidebar */}
+          {/* Sidebar */}
           <aside className="space-y-6">
             <Card>
-              <CardHeader><CardTitle>Actions & Reports</CardTitle></CardHeader>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-warning" /> Risk Summary</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <RiskIndicator disease="Diabetes" risk={riskScores.diabetes} color="warning" />
+                <RiskIndicator disease="Heart Disease" risk={riskScores.heartDisease} color="destructive" />
+                <RiskIndicator disease="Hypertension" risk={riskScores.hypertension} color="destructive" />
+                <RiskIndicator disease="Respiratory" risk={riskScores.respiratory} color="warning" />
+                <RiskIndicator disease="Alzheimer's" risk={riskScores.alzheimer} color="success" />
+              </CardContent>
+            </Card>
+            <UpcomingReminders/>
+
+            {/* Today's health tips */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Today's Tips</CardTitle>
+              </CardHeader>
               <CardContent>
-                <div className="flex flex-col gap-3">
-                  <Button variant="outline" className="flex items-center justify-center" onClick={() => navigate("/add-data")}><Plus className="h-4 w-4 mr-2" /> Add Data</Button>
-                  <Button variant="outline" className="flex items-center justify-center" onClick={() => navigate("/symptoms")}><Calendar className="h-4 w-4 mr-2" /> Log Symptoms</Button>
-                  <Button variant="outline" className="flex items-center justify-center" onClick={() => navigate("/reports")}><Calendar className="h-4 w-4 mr-2" /> Get Reports</Button>
+                <ul className="list-disc list-inside space-y-2 text-sm">
+                  {tips.map((t, i) => <li key={i}>{t}</li>)}
+                </ul>
+              </CardContent>
+            </Card>
+
+            {/* Upcoming Reminders */}
+            
+
+            {/* Recent Activity */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Recent Activity</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-3 text-sm">
+                  <div className="flex justify-between">
+                    <span>Last recorded vitals</span>
+                    <span className="text-muted-foreground">{latestVitals?.created_at ? new Date(latestVitals.created_at).toLocaleString() : "—"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Last symptom logged</span>
+                    <span className="text-muted-foreground">{symptomsList.length ? fmt(symptomsList[0].recorded_at) : "—"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Last insight</span>
+                    <span className="text-muted-foreground">{insights.length ? fmt(insights[0].created_at) : "—"}</span>
+                  </div>
                 </div>
               </CardContent>
             </Card>
 
-            {/* Notes */}
-            <Card>
-              <CardHeader><CardTitle>Notes</CardTitle></CardHeader>
-              <CardContent>
-                {notesList.length ? (
-                  <div className="space-y-3 text-sm">
-                    {notesList.map((n, i) => (
-                      <div key={i} className="space-y-1">
-                        <div className="text-xs text-muted-foreground">{n.source} • {n.created_at ? new Date(n.created_at).toLocaleString() : ""}</div>
-                        <div className="whitespace-pre-wrap">{n.text}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-muted-foreground">No notes yet. Notes from readings and AI insights will appear here.</div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Reminders */}
-            <Card>
-              <CardHeader><CardTitle>Reminders</CardTitle></CardHeader>
-              <CardContent>
-                {reminders.length ? (
-                  <div className="space-y-3">
-                    {reminders.map((r: any, i: number) => (
-                      <div key={i} className="text-sm">
-                        <div className="flex justify-between">
-                          <div className="font-medium">{r.title ?? "Reminder"}</div>
-                          <div className="text-xs text-muted-foreground">{r.scheduled_at ? new Date(r.scheduled_at).toLocaleString() : "—"}</div>
-                        </div>
-                        {r.body && <div className="text-xs text-muted-foreground mt-1">{r.body}</div>}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-muted-foreground">No upcoming reminders</div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Today's Tip */}
-            <Card>
-              <CardHeader><CardTitle>Today's Health Tip</CardTitle></CardHeader>
-              <CardContent><p className="text-sm text-muted-foreground">{todaysTip}</p></CardContent>
-            </Card>
-
-            {/* Symptoms (recent) */}
-            <Card>
-              <CardHeader><CardTitle>Symptoms (recent)</CardTitle></CardHeader>
-              <CardContent>
-                {symptoms.length ? (
-                  <div className="space-y-3">
-                    {symptoms.map((s, i) => (
-                      <div key={`${s.label}-${s.recorded_at}-${i}`} className="p-3 rounded-md bg-white shadow-sm border">
-                        <div className="flex items-baseline justify-between">
-                          <div className="text-base font-semibold text-foreground">{prettyLabel(s.label)}</div>
-                          <div className="text-xs text-muted-foreground">{formatDate(s.recorded_at)}</div>
-                        </div>
-                        <div className="mt-1 text-sm text-muted-foreground">Severity: <span className="font-medium text-foreground">{String(s.severity ?? "n/a").charAt(0).toUpperCase() + String(s.severity ?? "n/a").slice(1)}</span></div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-muted-foreground">No symptoms recorded</div>
-                )}
-              </CardContent>
-            </Card>
           </aside>
         </div>
       </main>
     </div>
   );
-};
-
-export default Dashboard;
+}

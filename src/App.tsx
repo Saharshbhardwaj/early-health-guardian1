@@ -10,6 +10,7 @@ import Dashboard from "@/pages/Dashboard";
 import AddData from "@/pages/AddData";
 import Symptoms from "./pages/Symptoms";
 import Reports from "./pages/Reports";
+import Reminders from "./pages/Reminders";
 
 const App: React.FC = () => {
   return (
@@ -19,6 +20,7 @@ const App: React.FC = () => {
         <Route path="/signup" element={<SignUp />} />
         <Route path="/confirm" element={<ConfirmEmail />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/reminders" element={<Reminders/>}/>
         <Route path="/add-data" element={<AddData />} />
         <Route path="/symptoms" element={<Symptoms/>}/>
         <Route path="/reports" element={<Reports/>}/>
