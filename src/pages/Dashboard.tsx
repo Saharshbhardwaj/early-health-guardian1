@@ -271,7 +271,7 @@ const Dashboard = () => {
           </div>
 
           <div className="flex items-center gap-4">
-            <span className="text-sm text-muted-foreground">Welcome, {user?.name || user?.email || "User"}</span>
+            <span className="text-sm text-muted-foreground">Welcome, {user?.name || "User"}</span>
             <Badge variant="default">patient</Badge>
             <Button variant="outline" size="sm" onClick={handleLogout}>
               <LogOut className="h-4 w-4 mr-2" />
