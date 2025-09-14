@@ -301,7 +301,7 @@ if (mounted) setRecentReadings(recent);;
 
         // fetch symptoms table; fallback to latestVitals.symptoms
         // fetch symptoms (if stored in a symptoms table) or parse from latestVitals
-// Fetch symptoms
+// fetch symptoms (robust: handles json array, object, string or fallback)
 const { data: symptomsTable, error: symptomsErr } = await supabase
   .from("symptoms")
   .select("id, user_id, symptoms, severity, notes, created_at, timestamp")
@@ -316,27 +316,41 @@ if (symptomsErr) {
   console.log("symptoms raw rows:", symptomsTable);
 
   const sList = symptomsTable.map((s: any, idx: number) => {
-    // Try to pull from jsonb `symptoms` first
-    let label = null;
-    if (s.symptoms) {
-      if (typeof s.symptoms === "string") {
-        label = s.symptoms;
-      } else if (typeof s.symptoms === "object") {
-        // If jsonb object, pick first key or value
-        label =
-          s.symptoms.label ||
-          s.symptoms.name ||
-          Object.values(s.symptoms)[0] ||
-          null;
+    let labelText = null;
+
+    // 1) If symptoms is an array of objects [{id, label}, ...]
+    if (Array.isArray(s.symptoms) && s.symptoms.length > 0) {
+      // map each element's label (or id) and join with comma
+      const labels = s.symptoms.map((el: any) => el?.label || el?.name || el?.id || String(el));
+      labelText = labels.filter(Boolean).join(", ");
+    }
+
+    // 2) If symptoms is an object (jsonb)
+    else if (s.symptoms && typeof s.symptoms === "object") {
+      // handle object either { label: 'x' } or keys->values
+      labelText =
+        s.symptoms.label ||
+        s.symptoms.name ||
+        Object.values(s.symptoms)[0] ||
+        null;
+      if (Array.isArray(labelText)) {
+        labelText = labelText.join(", ");
       }
     }
 
-    // fallback: notes or default
-    if (!label) label = s.notes || `Symptom ${idx + 1}`;
+    // 3) If symptoms is a plain string
+    else if (s.symptoms && typeof s.symptoms === "string") {
+      labelText = s.symptoms;
+    }
+
+    // 4) fallback to notes or "Symptom N"
+    if (!labelText || String(labelText).trim() === "") {
+      labelText = s.notes || `Symptom ${idx + 1}`;
+    }
 
     return {
       id: s.id,
-      label,
+      label: String(labelText),
       severity: s.severity || "reported",
       recorded_at: s.created_at || s.timestamp,
     };
@@ -346,7 +360,6 @@ if (symptomsErr) {
 } else {
   setSymptomsList([]);
 }
-
         // fetch notes (collect most recent notes from health_data)
         const notes = (vData || []).map(r => r.notes).filter(Boolean) as string[];
         setNotesList(notes.slice(0, 5));
@@ -377,9 +390,7 @@ if (symptomsErr) {
   // render symptom list as numbered items
   const renderSymptoms = () => {
   if (!symptomsList || symptomsList.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">No symptoms recorded.</p>
-    );
+    return <p className="text-sm text-muted-foreground">No symptoms recorded.</p>;
   }
 
   return (
@@ -388,10 +399,7 @@ if (symptomsErr) {
         <li key={s.id} className="p-2 rounded bg-gray-50">
           <div className="font-semibold text-gray-900">{s.label}</div>
           <div className="text-xs text-gray-500">
-            Severity: {s.severity} ·{" "}
-            {s.recorded_at
-              ? new Date(s.recorded_at).toLocaleString()
-              : "-"}
+            Severity: {s.severity} · {s.recorded_at ? new Date(s.recorded_at).toLocaleString() : "-"}
           </div>
         </li>
       ))}
