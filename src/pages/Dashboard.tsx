@@ -300,17 +300,44 @@ if (mounted) setRecentReadings(recent);;
         if (mounted) setReminders(remindersData || []);
 
         // fetch symptoms table; fallback to latestVitals.symptoms
-        const { data: symptomsTable } = await supabase.from("symptoms").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(10);
-        if (symptomsTable && symptomsTable.length) {
-          const sList = symptomsTable.map((s: any) => ({ id: s.id || (s.created_at + Math.random()), label: s.label ?? s.symptom, severity: s.severity ?? "mild", recorded_at: s.created_at }));
-          setSymptomsList(sList);
-        } else if (latest?.symptoms) {
-          const raw = String(latest.symptoms).trim();
-          const list = raw.split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean).map((t, i) => ({ id: `s-${i}`, label: t, severity: "reported", recorded_at: latest.created_at }));
-          setSymptomsList(list);
-        } else {
-          setSymptomsList([]);
-        }
+        // fetch symptoms (if stored in a symptoms table) or parse from latestVitals
+try {
+  const { data: symptomsTable, error: symptomsErr, status: symptomsStatus } = await supabase
+    .from("symptoms")
+    .select("*")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  console.log("symptoms fetch status:", symptomsStatus, "error:", symptomsErr, "rows:", symptomsTable?.length);
+  console.log("symptomsTable (raw):", symptomsTable);
+
+  if (symptomsErr && symptomsErr.code !== "PGRST116") {
+    console.warn("symptoms fetch error", symptomsErr);
+  }
+
+  if (symptomsTable && symptomsTable.length) {
+    const sList = symptomsTable.map((s: any) => ({
+      id: s.id || (s.created_at + Math.random()),
+      label: s.label ?? s.symptom ?? s.name ?? "Unnamed",
+      severity: s.severity ?? "mild",
+      recorded_at: s.created_at
+    }));
+    setSymptomsList(sList);
+  } else if (latest?.symptoms) {
+    // fallback: parse latestVitals.symptoms if present
+    const raw = String(latest.symptoms).trim();
+    const list = raw.split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean).map((t, i) => ({ id: `s-${i}`, label: t, severity: "reported", recorded_at: latest.created_at }));
+    setSymptomsList(list);
+    console.log("Used fallback latest.symptoms:", list);
+  } else {
+    setSymptomsList([]);
+    console.log("No symptoms found, symptomsList cleared.");
+  }
+} catch (e) {
+  console.error("Exception while fetching symptoms:", e);
+  setSymptomsList([]);
+}
 
         // fetch notes (collect most recent notes from health_data)
         const notes = (vData || []).map(r => r.notes).filter(Boolean) as string[];
