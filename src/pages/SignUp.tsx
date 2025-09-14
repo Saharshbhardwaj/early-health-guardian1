@@ -8,6 +8,23 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 
+/**
+ * Signup page
+ *
+ * Behavior:
+ *  - Calls supabase.auth.signUp({ email, password }, { redirectTo })
+ *  - If signUp returns a user id immediately -> upsert profile + insert caregiver
+ *  - If signUp does NOT return a user id (magic link) -> save pending profile/caregiver to localStorage
+ *    so your AuthCallback page can upsert after confirmation.
+ *
+ * IMPORTANT:
+ *  - If you use magic links, set `redirectTo` to your callback route (e.g. `${origin}/auth/callback`)
+ *  - Ensure RLS on `profiles` allows inserts by authenticated users or use a server trigger
+ */
+
+const PENDING_PROFILE_KEY = "ehg_pending_profile_v1";
+const PENDING_CAREGIVER_KEY = "ehg_pending_caregiver_v1";
+
 const Signup: React.FC = () => {
   const [fullName, setFullName] = useState("");
   const [age, setAge] = useState<number | "">("");
@@ -23,6 +40,55 @@ const Signup: React.FC = () => {
   const { toast } = useToast();
   const navigate = useNavigate();
 
+  function savePendingToLocalStorage(profilePayload: any, caregiverPayload?: any) {
+    try {
+      localStorage.setItem(PENDING_PROFILE_KEY, JSON.stringify(profilePayload));
+      if (caregiverPayload) localStorage.setItem(PENDING_CAREGIVER_KEY, JSON.stringify(caregiverPayload));
+    } catch (e) {
+      console.warn("failed to save pending profile to localStorage", e);
+    }
+  }
+
+  async function upsertProfile(userId: string, profilePayload: any) {
+    // ensure id field equals userId
+    const payload = { ...profilePayload, id: userId };
+    let error, data;
+    try {
+      const response = await supabase
+        .from("profiles")
+        .upsert([payload], { onConflict: "id" })
+        .select()
+        .single();
+      error = response.error;
+      data = response.data;
+    } catch (e: any) {
+      error = e;
+      data = null;
+    }
+    if (error) throw error;
+    return data;
+  }
+
+  async function insertCaregiver(userId: string, caregiverPayload: any) {
+    // attach patient_id to caregiver
+    const payload = { ...caregiverPayload, patient_id: userId };
+    let error, data;
+    try {
+      const response = await supabase
+        .from("caregivers")
+        .insert([payload])
+        .select()
+        .single();
+      error = response.error;
+      data = response.data;
+    } catch (e: any) {
+      error = e;
+      data = null;
+    }
+    if (error) throw error;
+    return data;
+  }
+
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -31,12 +97,30 @@ const Signup: React.FC = () => {
       return;
     }
 
+    // prepare payloads
+    const profilePayload = {
+      full_name: fullName || null,
+      age: age === "" ? null : Number(age),
+      sex: sex || null,
+      created_at: new Date().toISOString(),
+    };
+
+    const caregiverPayload = caregiverName || caregiverEmail || caregiverPhone ? {
+      name: caregiverName || null,
+      email: caregiverEmail || null,
+      phone: caregiverPhone || null,
+      created_at: new Date().toISOString(),
+    } : null;
+
     try {
-      // 1) create auth user (Supabase handles the auth.users row)
-      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email,
-        password,
-      });
+      // You may want to set redirectTo to your callback page if using magic links.
+      // e.g. redirectTo: `${window.location.origin}/auth/callback`
+      const redirectTo = `${window.location.origin}/auth/callback`;
+
+      // 1) create auth user
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp(
+        { email, password, options: { emailRedirectTo: redirectTo } }
+      );
 
       if (signUpError) {
         console.error("Sign up error:", signUpError);
@@ -44,81 +128,43 @@ const Signup: React.FC = () => {
         return;
       }
 
-      // Try to obtain the user ID. In some Supabase setups the user needs email confirmation,
-      // so the session may not be active yet. We attempt to fetch the current user object.
+      // signUpData may contain user on some setups (for example when email confirmation isn't required)
+      // Try to get the currently-known user from auth client
       const { data: currentUserData } = await supabase.auth.getUser();
-      const maybeUser = currentUserData?.user ?? (signUpData?.user ?? null);
+      const maybeUser = currentUserData?.user ?? signUpData?.user ?? null;
       const userId = maybeUser?.id ?? null;
 
-      // If we don't have a confirmed user/session, redirect to login and ask user to confirm email.
-      if (!userId) {
+      if (userId) {
+        // We have an immediate user -> upsert profile and caregiver now
+        try {
+          await upsertProfile(userId, { ...profilePayload, id: userId });
+          if (caregiverPayload) {
+            await insertCaregiver(userId, caregiverPayload);
+          }
+          toast({ title: "Signup successful", description: "Account created and profile saved.", variant: "default" });
+          navigate("/dashboard");
+        } catch (dbErr: any) {
+          console.error("DB error after signup (user exists):", dbErr);
+          toast({ title: "Partial save", description: dbErr?.message ?? "Error saving profile/caregiver", variant: "destructive" });
+          // still allow navigation to login or dashboard
+          navigate("/dashboard");
+        }
+      } else {
+        // No immediate user returned => Magic-link flow likely. Persist pending profile/caregiver to localStorage so AuthCallback can finish creation.
+        savePendingToLocalStorage(profilePayload, caregiverPayload || undefined);
+
         toast({
-          title: "Account created",
-          description: "Please confirm your email (check inbox). Then log in.",
+          title: "Check your email",
+          description: "A confirmation link has been sent. Click it to complete signup. When you return to the site your profile will be saved automatically.",
           variant: "default",
         });
-        navigate("/login");
-        return;
+
+        // redirect to a "check email" page or login for clarity
+        navigate("/check-email");
       }
-
-      // 2) UPSERT into profiles (so duplicate-primary-key doesn't error)
-      // Use columns that exist in your profiles table: id, full_name, age, sex, created_at
-      const profilePayload = {
-        id: userId,
-        full_name: fullName || null,
-        age: age === "" ? null : Number(age),
-        sex: sex || null,
-        created_at: new Date().toISOString(),
-      };
-
-      // upsert will insert or update on conflict (key = id)
-      const { data: profileUpserted, error: profileError } = await supabase
-        .from("profiles")
-        .upsert([profilePayload], { onConflict: "id" })
-        .select()
-        .single();
-
-      if (profileError) {
-        console.error("profiles upsert error", profileError);
-        toast({ title: "Profile save failed", description: profileError.message, variant: "destructive" });
-        // continue to caregiver attempt (we do not bail out)
-      } else {
-        // success — optionally toast or continue silently
-        console.log("Profile upserted:", profileUpserted);
-      }
-
-      // 3) Insert caregiver row (if caregiver info provided)
-      // Link via patient_id (your schema uses patient_id)
-      if (caregiverName || caregiverEmail || caregiverPhone) {
-        const caregiverPayload: any = {
-          patient_id: userId,
-          name: caregiverName || null,
-          email: caregiverEmail || null,
-          phone: caregiverPhone || null,
-          caregiver_user_id: null,
-          created_at: new Date().toISOString(),
-        };
-
-        const { data: caregiverInsert, error: caregiverError } = await supabase
-          .from("caregivers")
-          .insert([caregiverPayload])
-          .select()
-          .single();
-
-        if (caregiverError) {
-          console.error("caregivers insert error", caregiverError);
-          toast({ title: "Caregiver save failed", description: caregiverError.message, variant: "destructive" });
-        } else {
-          console.log("Caregiver saved:", caregiverInsert);
-          toast({ title: "Caregiver saved", variant: "default" });
-        }
-      }
-
-      toast({ title: "Signup successful", description: "Account created and profile saved.", variant: "default" });
-      navigate("/dashboard");
     } catch (err: any) {
       console.error("Unexpected error during signup:", err);
-      toast({ title: "Signup error", description: String(err), variant: "destructive" });
+      toast({ title: "Signup error", description: String(err?.message ?? err), variant: "destructive" });
     }
   };
 

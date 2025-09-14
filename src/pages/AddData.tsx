@@ -304,7 +304,7 @@ const AddData: React.FC = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="weight">Weight (lbs)</Label>
+                  <Label htmlFor="weight">Weight (kgs)</Label>
                   <Input id="weight" type="number" placeholder="165" value={formData.weight} onChange={(e) => handleInputChange("weight", e.target.value)} />
                 </div>
 
