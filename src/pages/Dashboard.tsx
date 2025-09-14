@@ -7,9 +7,10 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Heart, Activity, Thermometer, Plus, AlertTriangle, TrendingUp, Calendar, LogOut } from "lucide-react";
 import { HealthChart } from "@/components/HealthChart";
-import  RiskIndicator  from "@/components/RiskIndicator";
+import RiskIndicator from "@/components/RiskIndicator";
 import { useToast } from "@/hooks/use-toast";
 import UpcomingReminders from "@/components/UpcomingReminders";
+
 type Profile = {
   id: string;
   full_name?: string | null;
@@ -49,21 +50,46 @@ type Reminder = {
   id: string;
   title: string;
   description?: string | null;
-  remind_at: string;
+  remind_at?: string;
+  notify_at?: string;
   repeat?: string | null;
-  sent?: boolean;
+  sent?: boolean | null;
 };
 
 export default function Dashboard() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [latestVitals, setLatestVitals] = useState<HealthRow | null>(null);
-  const [recentReadings, setRecentReadings] = useState<Array<{ date: string; heartRate?: number; bp?: string | null; bloodSugar?: number | null }>>([]);
+ const [recentReadings, setRecentReadings] = useState<
+  Array<{
+    created_at: string;
+    heart_rate?: number | null;
+    blood_sugar?: number | null;
+    systolic_bp?: number | null;
+    diastolic_bp?: number | null;
+    weight?: number | null;
+    temperature?: number | null;
+    sleep_hours?: number | null;
+    exercise_minutes?: number | null;
+    mood?: string | null;
+    notes?: string | null;
+  }>
+>([]);
   const [insights, setInsights] = useState<Insight[]>([]);
   const [symptomsList, setSymptomsList] = useState<Array<{ id: string; label: string; severity?: string; recorded_at?: string }>>([]);
   const [notesList, setNotesList] = useState<string[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
-  const [riskScores, setRiskScores] = useState<{ [k: string]: number }>({ diabetes: 0, heartDisease: 0, alzheimer: 0, hypertension: 0, respiratory: 0 });
+  const [riskScores, setRiskScores] = useState<{ [k: string]: number }>({
+    diabetes: 0,
+    heartDisease: 0,
+    alzheimer: 0,
+    hypertension: 0,
+    respiratory: 0,
+    stroke: 0,
+    kidney: 0,
+    copd: 0,
+    obesity: 0,
+  });
   const [tips, setTips] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
@@ -80,12 +106,22 @@ export default function Dashboard() {
     "Limit salty snacks to help keep blood pressure down.",
     "Include light resistance exercise twice a week if able.",
     "Measure blood pressure after sitting calmly for 5 minutes.",
-    "If you feel dizzy, sit or lie down immediately and notify caregiver."
+    "If you feel dizzy, sit or lie down immediately and notify caregiver.",
   ];
 
-  // utility: simple risk scoring from a single reading (not clinical)
+  // compute risk heuristics (interpretable rules)
   const computeRiskFromReading = useCallback((p: Profile | null, row: HealthRow | null) => {
-    const baseScores = { diabetes: 0, heartDisease: 0, alzheimer: 0, hypertension: 0, respiratory: 0 };
+    const baseScores: { [k: string]: number } = {
+      diabetes: 0,
+      heartDisease: 0,
+      alzheimer: 0,
+      hypertension: 0,
+      respiratory: 0,
+      stroke: 0,
+      kidney: 0,
+      copd: 0,
+      obesity: 0,
+    };
     if (!row) return baseScores;
 
     const sugar = row.blood_sugar ?? null;
@@ -93,23 +129,64 @@ export default function Dashboard() {
     const dia = row.diastolic_bp ?? null;
     const hr = row.heart_rate ?? null;
     const temp = row.temperature ?? null;
+    const weight = row.weight ?? null;
     const age = p?.age ?? 60;
 
-    // simple interpretable heuristics
+    // Diabetes: sugar-driven
     if (sugar != null) {
-      // maps higher sugar to diabetes score
-      baseScores.diabetes = Math.min(100, Math.max(0, Math.round((sugar - 80) / 2)));
+      // stronger sensitivity for high sugar
+      baseScores.diabetes = Math.min(100, Math.max(0, Math.round((sugar - 80) * 0.9)));
     }
+
+    // Hypertension: systolic driven
     if (sys != null) {
-      baseScores.hypertension = Math.min(100, Math.max(0, Math.round((sys - 110) / 1.2)));
-      baseScores.heartDisease = Math.min(100, Math.max(0, Math.round(((sys - 120) / 1.5) + (hr ? (hr - 70) / 1.2 : 0))));
+      baseScores.hypertension = Math.min(100, Math.max(0, Math.round((sys - 110) * 1.2)));
     }
-    // age factor for alzheimer
+
+    // Heart disease: combination of bp and hr
+    if (sys != null || hr != null) {
+      const bpFactor = sys != null ? (sys - 120) / 1.5 : 0;
+      const hrFactor = hr != null ? (hr - 72) / 1.3 : 0;
+      baseScores.heartDisease = Math.min(100, Math.max(0, Math.round(bpFactor + hrFactor)));
+    }
+
+    // Alzheimer's: age-major factor, small modulation by inactivity (sleep)
     baseScores.alzheimer = Math.min(100, Math.max(0, Math.round((age - 55) * 1.2)));
-    // respiratory crude signal from temperature + hr
-    if (temp != null) {
-      baseScores.respiratory = Math.min(100, Math.max(0, Math.round((temp - 97) * 10)));
+
+    // Respiratory: temperature + elevated HR
+    if (temp != null || hr != null) {
+      const t = temp != null ? Math.max(0, (temp - 98)) * 8 : 0;
+      const h = hr != null ? Math.max(0, (hr - 80)) * 0.8 : 0;
+      baseScores.respiratory = Math.min(100, Math.max(0, Math.round(t + h)));
     }
+
+    // Stroke: heavily tied to hypertension + age
+    if (sys != null) {
+      baseScores.stroke = Math.min(100, Math.max(0, Math.round(((sys - 130) * 0.8) + ((age - 60) * 0.6))));
+    }
+
+    // Kidney: correlation with long-term high BP and high sugar — crude instant measure
+    if (sys != null || sugar != null) {
+      const k1 = sys != null ? Math.max(0, (sys - 120)) * 0.4 : 0;
+      const k2 = sugar != null ? Math.max(0, (sugar - 100)) * 0.3 : 0;
+      baseScores.kidney = Math.min(100, Math.max(0, Math.round(k1 + k2)));
+    }
+
+    // COPD: rough signal from elevated resting HR + temp
+    if (hr != null) {
+      baseScores.copd = Math.min(100, Math.max(0, Math.round((hr - 75) * 0.7 + (temp ? (temp - 98) * 5 : 0))));
+    }
+
+    // Obesity: we don't have height. crude proxy: high weight -> higher score (user should fill height to compute BMI)
+    if (weight != null) {
+      baseScores.obesity = Math.min(100, Math.max(0, Math.round((weight - 140) * 0.6)));
+    }
+
+    // normalize to positive integers + clamp
+    Object.keys(baseScores).forEach(k => {
+      const v = Math.round(baseScores[k] || 0);
+      baseScores[k] = Math.min(100, Math.max(0, v));
+    });
 
     return baseScores;
   }, []);
@@ -128,7 +205,7 @@ export default function Dashboard() {
     return "-";
   };
 
-  // fetch core data
+  // load core data
   useEffect(() => {
     let mounted = true;
     async function loadAll() {
@@ -143,16 +220,15 @@ export default function Dashboard() {
         if (!mounted) return;
         setUserId(user.id);
 
-        // fetch profile
-        const { data: profileData, error: profileErr } = await supabase.from("profiles").select("id,full_name,age,sex").eq("id", user.id).single();
-        if (profileErr && profileErr.code !== "PGRST116") {
-          // PGRST116 sometimes when table missing; still continue gracefully
+        // fetch profile (use maybeSingle equivalent)
+        const { data: profileData, error: profileErr } = await supabase.from("profiles").select("id,full_name,age,sex").eq("id", user.id).maybeSingle();
+        if (profileErr) {
           console.warn("profile fetch", profileErr);
         }
         const prof = profileData ?? { id: user.id, full_name: user.email };
         if (mounted) setProfile(prof);
 
-        // fetch last 20 readings for display
+        // fetch last 50 readings for display (most recent first)
         const { data: vitalsData } = await supabase
           .from("health_data")
           .select("*")
@@ -165,13 +241,30 @@ export default function Dashboard() {
         if (mounted) setLatestVitals(latest);
 
         // prepare recent readings for chart (convert to chronological order, pick last 10)
-        const recent = (vData || []).slice(0, 10).map(r => ({
-          date: r.created_at ?? r.timestamp ?? new Date().toISOString(),
-          heartRate: r.heart_rate ?? undefined,
-          bp: r.systolic_bp != null && r.diastolic_bp != null ? `${r.systolic_bp}/${r.diastolic_bp}` : null,
-          bloodSugar: r.blood_sugar ?? undefined
-        })).reverse();
-        if (mounted) setRecentReadings(recent);
+        const recent = (vData || [])
+  .slice(0, 10)
+  .map((r) => ({
+    // use created_at as the x axis (ISO string)
+    created_at: r.created_at ?? r.timestamp ?? new Date().toISOString(),
+
+    // numeric series (keep as numbers or null)
+    heart_rate: typeof r.heart_rate === "number" ? r.heart_rate : null,
+    blood_sugar: typeof r.blood_sugar === "number" ? r.blood_sugar : null,
+    systolic_bp: typeof r.systolic_bp === "number" ? r.systolic_bp : null,
+    diastolic_bp: typeof r.diastolic_bp === "number" ? r.diastolic_bp : null,
+    weight: typeof r.weight === "number" ? r.weight : null,
+    temperature: typeof r.temperature === "number" ? r.temperature : null,
+    sleep_hours: typeof r.sleep_hours === "number" ? r.sleep_hours : null,
+    exercise_minutes: typeof r.exercise_minutes === "number" ? r.exercise_minutes : null,
+
+    // keep any text fields (optional)
+    mood: r.mood ?? null,
+    notes: r.notes ?? null
+  }))
+  .reverse();
+
+// set state with typed shape (adjust type to match HealthChart input)
+if (mounted) setRecentReadings(recent);;
 
         // compute risk scores from latest
         const computed = computeRiskFromReading(prof, latest);
@@ -180,10 +273,14 @@ export default function Dashboard() {
           heartDisease: computed.heartDisease,
           alzheimer: computed.alzheimer,
           hypertension: computed.hypertension,
-          respiratory: computed.respiratory
+          respiratory: computed.respiratory,
+          stroke: computed.stroke,
+          kidney: computed.kidney,
+          copd: computed.copd,
+          obesity: computed.obesity,
         });
 
-        // fetch health_insights (latest 5)
+        // fetch health_insights (latest 10)
         const { data: insightsData } = await supabase
           .from("health_insights")
           .select("*")
@@ -192,23 +289,22 @@ export default function Dashboard() {
           .limit(10);
         if (mounted) setInsights(insightsData || []);
 
-        // fetch reminders
+        // fetch reminders - show only pending (sent=false or null)
         const { data: remindersData } = await supabase
           .from("reminders")
           .select("*")
           .eq("user_id", user.id)
-          .order("remind_at", { ascending: true })
+          .or('sent.eq.false,sent.is.null')
+          .order("notify_at", { ascending: true })
           .limit(5);
         if (mounted) setReminders(remindersData || []);
 
-        // fetch symptoms (if stored in a symptoms table) or parse from latest row
-        // attempt to read a 'symptoms' table first; fallback: use latestVitals.symptoms
+        // fetch symptoms table; fallback to latestVitals.symptoms
         const { data: symptomsTable } = await supabase.from("symptoms").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(10);
         if (symptomsTable && symptomsTable.length) {
           const sList = symptomsTable.map((s: any) => ({ id: s.id || (s.created_at + Math.random()), label: s.label ?? s.symptom, severity: s.severity ?? "mild", recorded_at: s.created_at }));
           setSymptomsList(sList);
         } else if (latest?.symptoms) {
-          // parse comma/newline separated notes (keep as readable list)
           const raw = String(latest.symptoms).trim();
           const list = raw.split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean).map((t, i) => ({ id: `s-${i}`, label: t, severity: "reported", recorded_at: latest.created_at }));
           setSymptomsList(list);
@@ -241,7 +337,6 @@ export default function Dashboard() {
     navigate("/");
   };
 
-  // useful: format date
   const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : "-");
 
   // render symptom list as numbered items
@@ -269,7 +364,7 @@ export default function Dashboard() {
     );
   };
 
-  // AI Insights: show human-friendly summary (insights.summary) not raw JSON
+  // human-friendly insights
   const renderInsights = () => {
     if (!insights || insights.length === 0) return <p className="text-sm text-muted-foreground">No AI insights yet. They will appear after you add data.</p>;
     return (
@@ -294,7 +389,41 @@ export default function Dashboard() {
     );
   };
 
-  // if still loading return skeleton-ish null (keeps layout)
+  // RiskChart - simple horizontal bars with colors
+  const RiskChart: React.FC<{ scores: { [k: string]: number } }> = ({ scores }) => {
+    const items = [
+      { key: "diabetes", label: "Diabetes", color: "bg-amber-400" },
+      { key: "heartDisease", label: "Heart Disease", color: "bg-red-500" },
+      { key: "hypertension", label: "Hypertension", color: "bg-blue-500" },
+      { key: "stroke", label: "Stroke", color: "bg-purple-500" },
+      { key: "kidney", label: "Kidney Disease", color: "bg-cyan-500" },
+      { key: "alzheimer", label: "Alzheimer's", color: "bg-green-500" },
+      { key: "respiratory", label: "Respiratory", color: "bg-orange-400" },
+      { key: "copd", label: "COPD", color: "bg-sky-600" },
+      { key: "obesity", label: "Obesity", color: "bg-violet-400" },
+    ];
+
+    return (
+      <div className="space-y-3">
+        {items.map(it => {
+          const val = Math.max(0, Math.min(100, Math.round(scores[it.key] ?? 0)));
+          return (
+            <div key={it.key} className="w-full">
+              <div className="flex justify-between items-center mb-1">
+                <div className="text-sm font-medium">{it.label}</div>
+                <div className="text-xs text-muted-foreground">{val}%</div>
+              </div>
+              <div className="w-full bg-muted rounded h-3 overflow-hidden">
+                <div className={`${it.color} h-3`} style={{ width: `${val}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // if still loading
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -328,50 +457,50 @@ export default function Dashboard() {
           {/* Main column */}
           <div className="lg:col-span-2 space-y-6">
 
-            {/* Current vitals row */}
+            {/* Current vitals row (left-aligned values + colors) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Card>
-                <CardHeader className="flex items-center justify-between pb-2">
+                <CardHeader className="pb-2 text-left">
                   <CardTitle className="text-sm font-medium">Heart Rate</CardTitle>
                   <Heart className="h-4 w-4 text-success" />
                 </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">{latestVitals?.heart_rate ?? "-"}</div>
-                  <p className="text-xs text-muted-foreground">bpm</p>
+                <CardContent className="text-center">
+                  <div className="text-2xl font-bold text-left text-red-600">{latestVitals?.heart_rate ?? "-"}</div>
+                  <p className="text-xs text-muted-foreground text-left">bpm</p>
                 </CardContent>
               </Card>
 
               <Card>
-                <CardHeader className="flex items-center justify-between pb-2">
+                <CardHeader className="pb-2 text-left">
                   <CardTitle className="text-sm font-medium">Blood Pressure</CardTitle>
                   <Activity className="h-4 w-4 text-info" />
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{formatBP(latestVitals)}</div>
-                  <p className="text-xs text-muted-foreground">mmHg</p>
+                  <div className="text-2xl font-bold text-left text-blue-600">{formatBP(latestVitals)}</div>
+                  <p className="text-xs text-muted-foreground text-left">mmHg</p>
                 </CardContent>
               </Card>
 
               <Card>
-                <CardHeader className="flex items-center justify-between pb-2">
+                <CardHeader className=" pb-2 text-left">
                   <CardTitle className="text-sm font-medium">Blood Sugar</CardTitle>
                   <Thermometer className="h-4 w-4 text-warning" />
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{latestVitals?.blood_sugar ?? "-"}</div>
-                  <p className="text-xs text-muted-foreground">mg/dL</p>
+                  <div className="text-2xl font-bold text-left text-amber-600">{latestVitals?.blood_sugar ?? "-"}</div>
+                  <p className="text-xs text-muted-foreground text-left">mg/dL</p>
                 </CardContent>
               </Card>
             </div>
 
-            {/* Chart + AI Insights */}
+            {/* Chart + AI Insights (Health Trends header left-aligned) */}
             <Card>
-              <CardHeader className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5" /> Health Trends</CardTitle>
+              <CardHeader className="pb-2 text-left">
+                <CardTitle className="flex items-center gap-2 text-left"><TrendingUp className="h-5 w-5" /> <span>Health Trends</span></CardTitle>
                 <div className="text-sm text-muted-foreground">Last {recentReadings.length} readings</div>
               </CardHeader>
               <CardContent>
-                <div className="space-y-4">
+                <div className="space-y-4 text-left">
                   <div>
                     <HealthChart data={recentReadings} />
                   </div>
@@ -385,7 +514,35 @@ export default function Dashboard() {
               </CardContent>
             </Card>
 
-            {/* Quick actions */}
+            {/* Risk Summary moved under the chart to make left column taller */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-warning" /> Risk Summary</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <RiskChart scores={riskScores} />
+              </CardContent>
+            </Card>
+
+            {/* Recent Symptoms (from symptoms table or latestVitals.symptoms) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Recent Symptoms</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {renderSymptoms()}
+                </CardContent>
+              </Card>
+
+              
+            
+
+          </div>
+
+          {/* Sidebar (Quick Actions + Upcoming Reminders + Today's Tips + Recent Activity) */}
+          <aside className="space-y-6">
+
+            {/* Quick Actions (moved to sidebar in place of previous Risk Summary) */}
             <Card>
               <CardHeader>
                 <CardTitle>Quick Actions</CardTitle>
@@ -408,44 +565,8 @@ export default function Dashboard() {
               </CardContent>
             </Card>
 
-            {/* Symptoms and notes area - symptoms below AI insights as requested */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Recent Symptoms</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {renderSymptoms()}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Notes</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {renderNotes()}
-                </CardContent>
-              </Card>
-            </div>
-
-          </div>
-
-          {/* Sidebar */}
-          <aside className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-warning" /> Risk Summary</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <RiskIndicator disease="Diabetes" risk={riskScores.diabetes} color="warning" />
-                <RiskIndicator disease="Heart Disease" risk={riskScores.heartDisease} color="destructive" />
-                <RiskIndicator disease="Hypertension" risk={riskScores.hypertension} color="destructive" />
-                <RiskIndicator disease="Respiratory" risk={riskScores.respiratory} color="warning" />
-                <RiskIndicator disease="Alzheimer's" risk={riskScores.alzheimer} color="success" />
-              </CardContent>
-            </Card>
-            <UpcomingReminders/>
+            {/* Upcoming Reminders (will show only pending reminders because we fetched sent=false) */}
+            <UpcomingReminders  />
 
             {/* Today's health tips */}
             <Card>
@@ -458,9 +579,14 @@ export default function Dashboard() {
                 </ul>
               </CardContent>
             </Card>
-
-            {/* Upcoming Reminders */}
-            
+            <Card>
+                <CardHeader>
+                  <CardTitle>Notes</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {renderNotes()}
+                </CardContent>
+              </Card>
 
             {/* Recent Activity */}
             <Card>

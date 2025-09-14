@@ -1,3 +1,4 @@
+// src/pages/Reminders.tsx
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useToast } from "@/hooks/use-toast";
@@ -7,32 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Trash, Plus, Check } from "lucide-react";
-
-/**
- * Types - adjust if your DB schema differs
- *
- * Expected reminders table columns:
- * - id: uuid
- * - user_id: uuid
- * - title: text
- * - description: text (nullable)
- * - notify_at: timestamp (nullable) -> stored as ISO string
- * - repeat: text (nullable) - e.g. "daily" / "weekly" / "none"
- * - repeat_interval: integer (nullable) - number of days/hours depending on repeat
- * - sent: boolean (nullable)
- * - created_at: timestamp
- */
-type ReminderRow = {
-  id: string;
-  user_id?: string | null;
-  title: string;
-  description?: string | null;
-  notify_at?: string | null; // ISO string from DB
-  repeat?: string | null;
-  repeat_interval?: number | null;
-  sent?: boolean | null;
-  created_at?: string | null;
-};
+import type { ReminderRow, CaregiverRow } from "@/lib/types/type";
 
 const defaultNewReminder = {
   title: "",
@@ -40,59 +16,75 @@ const defaultNewReminder = {
   notify_at: "",
   repeat: "none",
   repeat_interval: 1,
+  recipient_email: "",
+  caregiver_id: ""
 };
 
 const Reminders: React.FC = () => {
   const { toast } = useToast();
   const [reminders, setReminders] = useState<ReminderRow[]>([]);
+  const [caregivers, setCaregivers] = useState<CaregiverRow[]>([]);
   const [loading, setLoading] = useState(false);
 
   // form state
   const [title, setTitle] = useState(defaultNewReminder.title);
-  const [description, setDescription] = useState(defaultNewReminder.description);
-  const [notifyAt, setNotifyAt] = useState(defaultNewReminder.notify_at); // datetime-local value
+  const [description, setDescription] = useState<string | null>(defaultNewReminder.description);
+  const [notifyAt, setNotifyAt] = useState<string>(defaultNewReminder.notify_at);
   const [repeat, setRepeat] = useState<string>(defaultNewReminder.repeat);
   const [repeatInterval, setRepeatInterval] = useState<number>(defaultNewReminder.repeat_interval);
+  const [recipientEmail, setRecipientEmail] = useState<string>(defaultNewReminder.recipient_email);
+  const [selectedCaregiver, setSelectedCaregiver] = useState<string | null>(null);
 
-  // load on mount
   useEffect(() => {
     fetchReminders();
-    // optionally you can subscribe to real-time changes here
+    fetchCaregiversForUser();
   }, []);
 
   async function fetchReminders() {
-    setLoading(true);
+  setLoading(true);
+  try {
+    const { data, error } = await supabase
+      .from("reminders")
+      .select("id,user_id,title,description,notify_at,repeat,repeat_interval,sent,created_at,recipient_email,caregiver_id")
+      .order("notify_at", { ascending: true });
+
+    if (error) {
+      console.error("fetch reminders error", error);
+      toast({ title: "Failed to load reminders", description: error.message, variant: "destructive" });
+      setReminders([]);
+    } else {
+      setReminders(Array.isArray(data) ? data : []);
+    }
+  } catch (err: any) {
+    console.error("fetch reminders exception", err);
+    toast({ title: "Failed to load reminders", description: String(err?.message ?? err), variant: "destructive" });
+    setReminders([]);
+  } finally {
+    setLoading(false);
+  }
+}
+
+  // Fetch caregivers associated with the current user (patient)
+  async function fetchCaregiversForUser() {
     try {
-      // Remove generic <ReminderRow>
+      // We assume API will filter caregivers where patient_id = auth.uid() or similar;
+      // If you store patient user id in state, replace the filter. For now, fetch caregivers and let UI filter.
       const { data, error } = await supabase
-        .from("reminders")
-        .select("id,title,description,notify_at,repeat,repeat_interval,sent,created_at")
-        .order("notify_at", { ascending: true });
+        .from("caregivers")
+        .select("id,name,email,patient_id,user_id")
+        .order("created_at", { ascending: false });
 
       if (error) {
-        console.error("fetch reminders error", error);
-        toast({
-          title: "Failed to load reminders",
-          description: error.message,
-          variant: "destructive",
-        });
-        setReminders([]);
+        console.error("fetch caregivers error", error);
+        setCaregivers([]);
       } else {
-        setReminders(Array.isArray(data) ? data : []);
+        setCaregivers(Array.isArray(data) ? data : []);
       }
-    } catch (err: any) {
-      console.error("fetch reminders exception", err);
-      toast({
-        title: "Failed to load reminders",
-        description: String(err?.message ?? err),
-        variant: "destructive",
-      });
-      setReminders([]);
-    } finally {
-      setLoading(false);
+    } catch (err) {
+      console.error("fetch caregivers exception", err);
+      setCaregivers([]);
     }
   }
-
 
   function formatNotifyAt(iso?: string | null) {
     if (!iso) return "No time set";
@@ -105,10 +97,8 @@ const Reminders: React.FC = () => {
     }
   }
 
-  // convert datetime-local value ("YYYY-MM-DDTHH:mm") to ISO string
   function dateTimeLocalToISO(value: string) {
     if (!value) return null;
-    // treat as local time -> toISOString will convert to UTC
     const d = new Date(value);
     return isNaN(d.getTime()) ? null : d.toISOString();
   }
@@ -120,38 +110,45 @@ const Reminders: React.FC = () => {
       return;
     }
 
-    const payload = {
+    const recip = (recipientEmail || "").trim();
+    if (recip && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recip)) {
+      toast({ title: "Invalid email", description: "Please enter a valid recipient email or leave blank", variant: "destructive" });
+      return;
+    }
+
+    const payload: any = {
       title: title.trim(),
       description: description?.trim() || null,
-      notify_at: dateTimeLocalToISO(notifyAt) as string | null,
+      notify_at: dateTimeLocalToISO(notifyAt),
       repeat: repeat === "none" ? null : repeat,
       repeat_interval: repeatInterval || null,
-      sent: false,
+      sent: false
     };
+
+    if (recip) payload.recipient_email = recip;
+    if (selectedCaregiver) payload.caregiver_id = selectedCaregiver;
 
     setLoading(true);
     try {
       const { data, error } = await supabase
         .from("reminders")
         .insert([payload])
-        .select("id,title,description,notify_at,repeat,repeat_interval,sent,created_at");
+        .select("id,title,description,notify_at,repeat,repeat_interval,sent,created_at,recipient_email,caregiver_id");
 
       if (error) {
         console.error("insert reminder error", error);
         toast({ title: "Save failed", description: error.message, variant: "destructive" });
-      } else if (Array.isArray(data) && data.length > 0) {
+      } else {
         toast({ title: "Reminder saved", description: "Your reminder was added." });
-        // prepend or re-fetch
-        fetchReminders();
+        await fetchReminders();
         // reset form
         setTitle("");
         setDescription("");
         setNotifyAt("");
         setRepeat("none");
         setRepeatInterval(1);
-      } else {
-        // unexpected
-        fetchReminders();
+        setRecipientEmail("");
+        setSelectedCaregiver(null);
       }
     } catch (err: any) {
       console.error("save reminder exception", err);
@@ -182,8 +179,7 @@ const Reminders: React.FC = () => {
   }
 
   async function toggleSent(rem: ReminderRow) {
-    // flip sent boolean
-    const newSent = !rem.sent;
+    const newSent = !Boolean(rem.sent);
     setLoading(true);
     try {
       const { data, error } = await supabase
@@ -231,8 +227,24 @@ const Reminders: React.FC = () => {
               </div>
 
               <div>
+                <Label htmlFor="recipient_email">Recipient email (optional)</Label>
+                <Input id="recipient_email" type="email" value={recipientEmail} onChange={(e) => setRecipientEmail(e.target.value)} placeholder="caregiver@example.com" />
+                <p className="text-xs text-muted-foreground">If left empty, select a caregiver below or the system will fallback to a linked caregiver.</p>
+              </div>
+
+              <div>
+                <Label htmlFor="caregiver">Select caregiver (optional)</Label>
+                <select id="caregiver" value={selectedCaregiver || ""} onChange={(e) => setSelectedCaregiver(e.target.value || null)} className="w-full border rounded px-2 py-1">
+                  <option value="">— No selection —</option>
+                  {caregivers.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name || c.email}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-muted-foreground">Choosing a caregiver will set that caregiver as the recipient for the reminder.</p>
+              </div>
+
+              <div>
                 <Label htmlFor="notify_at">Date & Time</Label>
-                {/* datetime-local input gives local time string like "2025-09-14T13:30" */}
                 <Input id="notify_at" type="datetime-local" value={notifyAt || ""} onChange={(e) => setNotifyAt(e.target.value)} />
               </div>
 
@@ -255,7 +267,7 @@ const Reminders: React.FC = () => {
               </div>
 
               <div className="flex justify-end gap-2">
-                <Button type="button" variant="ghost" onClick={() => { setTitle(""); setDescription(""); setNotifyAt(""); setRepeat("none"); setRepeatInterval(1); }}>
+                <Button type="button" variant="ghost" onClick={() => { setTitle(""); setDescription(""); setNotifyAt(""); setRepeat("none"); setRepeatInterval(1); setRecipientEmail(""); setSelectedCaregiver(null); }}>
                   Cancel
                 </Button>
                 <Button type="submit" disabled={loading}>
@@ -274,41 +286,49 @@ const Reminders: React.FC = () => {
         {reminders.length === 0 && !loading && <div className="text-sm text-muted-foreground">No reminders yet.</div>}
 
         <div className="space-y-3">
-          {reminders.map((r) => (
-            <Card key={r.id}>
-              <CardContent className="flex justify-between items-start gap-4">
-                <div>
-                  <div className="flex items-baseline gap-3">
-                    <h3 className="text-lg font-medium">{r.title}</h3>
-                    <span className="text-sm text-muted-foreground">{formatNotifyAt(r.notify_at)}</span>
-                  </div>
-                  <div className="text-sm text-muted-foreground mt-1">
-                    {r.description ? r.description : <em>No details</em>}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-2">
-                    Repeat: {r.repeat ?? "none"}{r.repeat !== "none" && r.repeat_interval ? ` • every ${r.repeat_interval}` : ""}
-                  </div>
-                </div>
+          {reminders.map((r) => {
+            const emailToShow = r.recipient_email || (r.caregiver && (r.caregiver as any).email) || "—";
+            return (
+              <Card key={r.id}>
+                <CardContent className="flex justify-between items-start gap-4">
+                  <div>
+                    <div className="flex items-baseline gap-3">
+                      <h3 className="text-lg font-medium">{r.title}</h3>
+                      <span className="text-sm text-muted-foreground">{formatNotifyAt(r.notify_at)}</span>
+                    </div>
+                    <div className="text-sm text-muted-foreground mt-1">
+                      {r.description ? r.description : <em>No details</em>}
+                    </div>
 
-                <div className="flex flex-col items-end gap-2">
-                  <div className="flex gap-2">
-                    <Button size="sm" variant={r.sent ? "outline" : "secondary"} onClick={() => toggleSent(r)}>
-                      <Check className="mr-2 h-3 w-3" />
-                      {r.sent ? "Marked sent" : "Mark as sent"}
-                    </Button>
+                    <div className="text-xs text-muted-foreground mt-2">
+                      Recipient: {emailToShow}
+                    </div>
 
-                    <Button size="sm" variant="destructive" onClick={() => handleDelete(r.id)}>
-                      <Trash className="mr-2 h-3 w-3" />
-                      Delete
-                    </Button>
+                    <div className="text-xs text-muted-foreground mt-2">
+                      Repeat: {r.repeat ?? "none"}{r.repeat !== "none" && r.repeat_interval ? ` • every ${r.repeat_interval}` : ""}
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    Created: {r.created_at ? new Date(r.created_at).toLocaleString() : "—"}
+
+                  <div className="flex flex-col items-end gap-2">
+                    <div className="flex gap-2">
+                      <Button size="sm" variant={r.sent ? "outline" : "secondary"} onClick={() => toggleSent(r)}>
+                        <Check className="mr-2 h-3 w-3" />
+                        {r.sent ? "Marked sent" : "Mark as sent"}
+                      </Button>
+
+                      <Button size="sm" variant="destructive" onClick={() => handleDelete(r.id!)}>
+                        <Trash className="mr-2 h-3 w-3" />
+                        Delete
+                      </Button>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Created: {r.created_at ? new Date(r.created_at).toLocaleString() : "—"}
+                    </div>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       </div>
     </div>

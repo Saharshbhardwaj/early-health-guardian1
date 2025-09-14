@@ -1,10 +1,18 @@
 // src/components/UpcomingReminders.tsx
+// UpcomingReminders.tsx
+// or import Reminder type from its definition
+
+// Removed duplicate UpcomingRemindersProps and UpcomingReminders declaration
+
+
 import React, { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/lib/supabaseClient";
 import { useNavigate } from "react-router-dom";
+import type { ReminderRow as SupabaseReminderRow } from "@/lib/types/type";
+// import { Reminder } from "@/pages/Dashboard"; // Removed: not exported and not used
 
 type ReminderRow = {
   id: string;
