@@ -301,41 +301,49 @@ if (mounted) setRecentReadings(recent);;
 
         // fetch symptoms table; fallback to latestVitals.symptoms
         // fetch symptoms (if stored in a symptoms table) or parse from latestVitals
-try {
-  const { data: symptomsTable, error: symptomsErr, status: symptomsStatus } = await supabase
-    .from("symptoms")
-    .select("*")
-    .eq("user_id", user.id)
-    .order("created_at", { ascending: false })
-    .limit(10);
+// Fetch symptoms
+const { data: symptomsTable, error: symptomsErr } = await supabase
+  .from("symptoms")
+  .select("id, user_id, symptoms, severity, notes, created_at, timestamp")
+  .eq("user_id", user.id)
+  .order("created_at", { ascending: false })
+  .limit(10);
 
-  console.log("symptoms fetch status:", symptomsStatus, "error:", symptomsErr, "rows:", symptomsTable?.length);
-  console.log("symptomsTable (raw):", symptomsTable);
+if (symptomsErr) {
+  console.error("symptoms fetch error", symptomsErr);
+  setSymptomsList([]);
+} else if (Array.isArray(symptomsTable) && symptomsTable.length > 0) {
+  console.log("symptoms raw rows:", symptomsTable);
 
-  if (symptomsErr && symptomsErr.code !== "PGRST116") {
-    console.warn("symptoms fetch error", symptomsErr);
-  }
+  const sList = symptomsTable.map((s: any, idx: number) => {
+    // Try to pull from jsonb `symptoms` first
+    let label = null;
+    if (s.symptoms) {
+      if (typeof s.symptoms === "string") {
+        label = s.symptoms;
+      } else if (typeof s.symptoms === "object") {
+        // If jsonb object, pick first key or value
+        label =
+          s.symptoms.label ||
+          s.symptoms.name ||
+          Object.values(s.symptoms)[0] ||
+          null;
+      }
+    }
 
-  if (symptomsTable && symptomsTable.length) {
-    const sList = symptomsTable.map((s: any) => ({
-      id: s.id || (s.created_at + Math.random()),
-      label: s.label ?? s.symptom ?? s.name ?? "Unnamed",
-      severity: s.severity ?? "mild",
-      recorded_at: s.created_at
-    }));
-    setSymptomsList(sList);
-  } else if (latest?.symptoms) {
-    // fallback: parse latestVitals.symptoms if present
-    const raw = String(latest.symptoms).trim();
-    const list = raw.split(/[\n,;]+/).map((t) => t.trim()).filter(Boolean).map((t, i) => ({ id: `s-${i}`, label: t, severity: "reported", recorded_at: latest.created_at }));
-    setSymptomsList(list);
-    console.log("Used fallback latest.symptoms:", list);
-  } else {
-    setSymptomsList([]);
-    console.log("No symptoms found, symptomsList cleared.");
-  }
-} catch (e) {
-  console.error("Exception while fetching symptoms:", e);
+    // fallback: notes or default
+    if (!label) label = s.notes || `Symptom ${idx + 1}`;
+
+    return {
+      id: s.id,
+      label,
+      severity: s.severity || "reported",
+      recorded_at: s.created_at || s.timestamp,
+    };
+  });
+
+  setSymptomsList(sList);
+} else {
   setSymptomsList([]);
 }
 
@@ -368,18 +376,28 @@ try {
 
   // render symptom list as numbered items
   const renderSymptoms = () => {
-    if (!symptomsList || symptomsList.length === 0) return <p className="text-sm text-muted-foreground">No symptoms recorded.</p>;
+  if (!symptomsList || symptomsList.length === 0) {
     return (
-      <ol className="list-decimal list-inside text-sm space-y-1">
-        {symptomsList.map((s) => (
-          <li key={s.id}>
-            <div className="font-semibold">{s.label}</div>
-            <div className="text-xs text-muted-foreground">Severity: {s.severity} · {s.recorded_at ? fmt(s.recorded_at) : "-"}</div>
-          </li>
-        ))}
-      </ol>
+      <p className="text-sm text-muted-foreground">No symptoms recorded.</p>
     );
-  };
+  }
+
+  return (
+    <ol className="list-decimal list-inside text-sm space-y-1">
+      {symptomsList.map((s) => (
+        <li key={s.id} className="p-2 rounded bg-gray-50">
+          <div className="font-semibold text-gray-900">{s.label}</div>
+          <div className="text-xs text-gray-500">
+            Severity: {s.severity} ·{" "}
+            {s.recorded_at
+              ? new Date(s.recorded_at).toLocaleString()
+              : "-"}
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+};
 
   // render notes list
   const renderNotes = () => {
